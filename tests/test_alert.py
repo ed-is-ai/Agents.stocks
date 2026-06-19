@@ -6,8 +6,8 @@ import pytest
 import os
 from unittest.mock import patch, MagicMock
 
-from agents.alert.alert_agent import AlertAgent
-from models import EmailConfig, StockRecord, StockScan, StockAnalysis
+from app.agents.alert.alert_agent import AlertAgent
+from app.schemas import EmailConfig, StockRecord, StockScan, StockAnalysis
 
 
 class TestAlertAgent:
@@ -210,9 +210,9 @@ class TestAlertAgent:
     def test_run_method_with_alerts(self, tmp_path, sample_high_score_stocks):
         """Test run method queues a buy alert per breakout stock."""
         agent = AlertAgent(db_path=str(tmp_path / "alerts.db"))
-        count = agent.run(sample_high_score_stocks)
+        summary = agent.run(sample_high_score_stocks)
 
-        assert count == len(sample_high_score_stocks)
+        assert summary.buy_count == len(sample_high_score_stocks)
         assert len(agent._buy_alerts) == len(sample_high_score_stocks)
 
     def test_database_operations(self, sample_high_score_stocks):
@@ -250,7 +250,7 @@ class TestAlertAgent:
         monkeypatch.setenv("EMAIL_TO", "recipient@example.com")
 
         import importlib
-        import agents.alert.alert_agent as alert_agent_module
+        import app.agents.alert.alert_agent as alert_agent_module
 
         reload_module = importlib.reload(alert_agent_module)
 
