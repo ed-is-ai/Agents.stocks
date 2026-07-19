@@ -15,6 +15,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from dotenv import load_dotenv
 
@@ -54,7 +55,11 @@ from app.core.config import (
     PORTFOLIO_VALUE_CSV,
     SCAN_RESULTS_JSON,
 )
-from app.repositories.pipeline_status_repo import PipelineStatusRepository
+from app.repositories.pipeline_status_repo import (
+    PipelineRunActiveError,
+    PipelineRunInactiveError,
+    PipelineStatusRepository,
+)
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
 from app.workflows.pipeline import PipelineStepEvent
 
@@ -586,7 +591,7 @@ def is_market_hours() -> bool:
     return open_mins <= current_mins <= close_mins
 
 
-def pipeline(force: bool = False, extract: bool = False) -> None:
+def pipeline(force: bool = False, extract: bool = False) -> bool:
     start_dt = datetime.now(timezone.utc)
     status_repo = PipelineStatusRepository(
         PIPELINE_STATUS_JSON,
@@ -595,13 +600,15 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         ),
     )
     requested_run_id = os.getenv("PIPELINE_RUN_ID")
-    run_status = status_repo.start(
-        run_id=requested_run_id,
-        expected_run_id=requested_run_id,
-    )
-    run_id = requested_run_id or run_status.run_id
-    if run_id is None:  # PipelineStatus.start always supplies one.
-        raise RuntimeError("Pipeline run ID was not initialized")
+    run_id = requested_run_id or str(uuid4())
+    try:
+        status_repo.start(
+            run_id=run_id,
+            expected_run_id=requested_run_id,
+        )
+    except (PipelineRunActiveError, PipelineRunInactiveError) as error:
+        print(f"[{start_dt.strftime('%H:%M')}] {error} Skipping this invocation.")
+        return False
 
     if not force and not is_market_hours():
         print(f"[{start_dt.strftime('%H:%M')}] Outside market hours — skipping")
@@ -621,7 +628,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             }
         )
         status_repo.finish(PipelineState.SKIPPED, expected_run_id=run_id)
-        return
+        return False
 
     print(f"\n{'=' * 50}")
     print(f"Pipeline run: {start_dt.strftime('%Y-%m-%d %H:%M UTC')}")
@@ -867,6 +874,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             f"{duration}s | scanned={scanned} analysed={analysed} "
             f"actionable={log_entry['actionable']} (buy={buy_alerts} sell={sell_alerts})"
         )
+    return not errors
 
 
 def main() -> None:
@@ -888,7 +896,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.once:
-        pipeline(force=True, extract=args.extract)
+        if not pipeline(force=True, extract=args.extract):
+            raise SystemExit(1)
         return
 
     print(

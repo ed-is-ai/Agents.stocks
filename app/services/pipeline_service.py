@@ -21,7 +21,10 @@ from app.core.config import (
     PIPELINE_STATUS_JSON,
     ROOT_DIR,
 )
-from app.repositories.pipeline_status_repo import PipelineStatusRepository
+from app.repositories.pipeline_status_repo import (
+    PipelineRunActiveError,
+    PipelineStatusRepository,
+)
 from app.schemas.pipeline_status import PipelineStage, PipelineState
 
 _RUN_TIMEOUT_SECONDS = PIPELINE_RUN_TIMEOUT_SECONDS
@@ -61,7 +64,10 @@ class PipelineService:
     def _run_once_locked(self) -> PipelineRunResult:
         """Run one refresh while holding the process-wide single-run lock."""
         run_id = str(uuid4())
-        _status_repository.start(run_id=run_id)
+        try:
+            _status_repository.start(run_id=run_id)
+        except PipelineRunActiveError as error:
+            return PipelineRunResult(success=False, details=str(error))
         environment = os.environ.copy()
         environment["PIPELINE_RUN_ID"] = run_id
         try:
@@ -86,7 +92,17 @@ class PipelineService:
             return outcome
         details = (result.stdout or result.stderr).strip()
         persisted = _status_repository.load()
-        success = result.returncode == 0 and persisted.state is not PipelineState.FAILED
+        owns_status = persisted.run_id == run_id
+        success = (
+            owns_status
+            and result.returncode == 0
+            and persisted.state is not PipelineState.FAILED
+        )
+        if not owns_status:
+            details = (
+                f"Pipeline run {run_id} no longer owns the status record; "
+                f"active run is {persisted.run_id}."
+            )
         outcome = PipelineRunResult(success=success, details=details)
         self._set_finished(outcome, run_id)
         return outcome
@@ -125,6 +141,8 @@ class PipelineService:
     @staticmethod
     def _set_finished(outcome: PipelineRunResult, run_id: str) -> None:
         current = _status_repository.load()
+        if current.run_id != run_id:
+            return
         if not outcome.success and current.state is not PipelineState.FAILED:
             _status_repository.finish(
                 PipelineState.FAILED,

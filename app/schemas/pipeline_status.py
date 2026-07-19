@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -57,6 +57,13 @@ class StageStatus(BaseModel):
     total: int | None = None
     substage: str | None = None
 
+    @field_validator("started_at", "completed_at")
+    @classmethod
+    def require_aware_timestamps(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("pipeline timestamps must include a timezone")
+        return value
+
 
 class PipelineStatus(BaseModel):
     schema_version: int = 1
@@ -75,6 +82,13 @@ class PipelineStatus(BaseModel):
     analysed: int = 0
     actionable: int = 0
     error_summary: str | None = None
+
+    @field_validator("started_at", "updated_at", "completed_at")
+    @classmethod
+    def require_aware_timestamps(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("pipeline timestamps must include a timezone")
+        return value
 
     @model_validator(mode="after")
     def validate_stage_contract(self) -> Self:

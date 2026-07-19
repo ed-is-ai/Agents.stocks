@@ -113,16 +113,40 @@ def test_older_service_completion_does_not_terminate_newer_run(
     repo = _use_status_repo(monkeypatch, tmp_path)
 
     def fake_run(*args, **kwargs):
-        assert kwargs["env"]["PIPELINE_RUN_ID"] != "run-b"
+        old_run_id = kwargs["env"]["PIPELINE_RUN_ID"]
+        repo.finish(PipelineState.COMPLETE, expected_run_id=old_run_id)
         repo.start(run_id="run-b")
-        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="old failed")
+        repo.finish(PipelineState.COMPLETE, expected_run_id="run-b")
+        return subprocess.CompletedProcess(args, returncode=0, stdout="old ok", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = PipelineService().run_once()
 
     retained = repo.load()
     assert result.success is False
+    assert "no longer owns" in result.details
     assert retained.run_id == "run-b"
+    assert retained.state is PipelineState.COMPLETE
+
+
+def test_external_active_run_is_refused_without_spawning(monkeypatch, tmp_path) -> None:
+    repo = _use_status_repo(monkeypatch, tmp_path)
+    repo.start(run_id="scheduled-run")
+    spawned = False
+
+    def fake_run(*args, **kwargs):
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("subprocess must not start")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = PipelineService().run_once()
+
+    assert result.success is False
+    assert "already running" in result.details.lower()
+    assert spawned is False
+    retained = repo.load()
+    assert retained.run_id == "scheduled-run"
     assert retained.state is PipelineState.RUNNING
 
 

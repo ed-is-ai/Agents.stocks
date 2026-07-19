@@ -28,6 +28,22 @@ from app.schemas.pipeline_status import (
 )
 
 
+class PipelineRunActiveError(RuntimeError):
+    """Raised when a new caller cannot acquire the active-run lease."""
+
+    def __init__(self, status: PipelineStatus) -> None:
+        self.status = status
+        super().__init__(f"Pipeline run {status.run_id} is already running.")
+
+
+class PipelineRunInactiveError(RuntimeError):
+    """Raised when a child can no longer attach to its expected run."""
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__(f"Pipeline run {run_id} is no longer active.")
+
+
 class PipelineStatusRepository:
     """Read and atomically replace the status artifact.
 
@@ -61,8 +77,7 @@ class PipelineStatusRepository:
             status = self._read()
             if status.state is PipelineState.RUNNING:
                 now = self._now()
-                age = (now - status.updated_at).total_seconds()
-                if age > self.stale_after_seconds:
+                if self._is_stale(status, now):
                     status = self._recover_interrupted(status)
                     self._write(status)
                 else:
@@ -103,20 +118,37 @@ class PipelineStatusRepository:
     ) -> PipelineStatus:
         with self._transaction():
             current = self._read()
-            if expected_run_id is not None and current.run_id is not None:
-                # A subprocess attaches to the run created by its caller. If a
-                # newer run has replaced it, the old subprocess is no longer
-                # allowed to reset the shared artifact.
-                return current
+            if current.state is PipelineState.RUNNING and self._is_stale(
+                current, self._now()
+            ):
+                current = self._recover_interrupted(current)
+                self._write(current)
+
+            if expected_run_id is not None:
+                if (
+                    current.state is PipelineState.RUNNING
+                    and current.run_id == expected_run_id
+                ):
+                    return current
+                if current.state is PipelineState.RUNNING:
+                    raise PipelineRunActiveError(current)
+                if current.run_id is not None:
+                    raise PipelineRunInactiveError(expected_run_id)
+            elif current.state is PipelineState.RUNNING:
+                raise PipelineRunActiveError(current)
+
             now = self._now()
             status = PipelineStatus(
-                run_id=run_id or str(uuid4()),
+                run_id=expected_run_id or run_id or str(uuid4()),
                 state=PipelineState.RUNNING,
                 started_at=now,
                 updated_at=now,
             )
             self._write(status)
         return status
+
+    def _is_stale(self, status: PipelineStatus, now: datetime) -> bool:
+        return (now - status.updated_at).total_seconds() > self.stale_after_seconds
 
     def transition(
         self,

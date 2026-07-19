@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from app.api.app import app
@@ -53,3 +55,17 @@ def test_pipeline_status_terminal_state_stops_polling(monkeypatch, tmp_path) -> 
     assert "Pipeline partially complete" in response.text
     assert 'hx-trigger="every 2s"' not in response.text
     assert "One source failed" in response.text
+
+
+def test_pipeline_status_naive_timestamp_fails_safe_to_idle(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "status.json"
+    repo = PipelineStatusRepository(path)
+    payload = repo.start(run_id="bad-time").model_dump(mode="json")
+    payload["updated_at"] = "2026-07-19T20:00:00"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+
+    response = client.get("/pipeline-status")
+
+    assert response.status_code == 200
+    assert "Pipeline idle" in response.text
