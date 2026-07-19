@@ -44,9 +44,14 @@ def test_nonzero_exit_overrides_premature_complete_status(monkeypatch, tmp_path)
     repo = _use_status_repo(monkeypatch, tmp_path)
 
     def fake_run(*args, **kwargs):
-        repo.transition(PipelineStage.EXPORT, StageState.RUNNING)
-        repo.transition(PipelineStage.EXPORT, StageState.COMPLETE)
-        repo.finish(PipelineState.COMPLETE)
+        run_id = kwargs["env"]["PIPELINE_RUN_ID"]
+        repo.transition(
+            PipelineStage.EXPORT, StageState.RUNNING, expected_run_id=run_id
+        )
+        repo.transition(
+            PipelineStage.EXPORT, StageState.COMPLETE, expected_run_id=run_id
+        )
+        repo.finish(PipelineState.COMPLETE, expected_run_id=run_id)
         return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="log failed")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -72,7 +77,13 @@ def test_run_once_timeout_returns_failure(monkeypatch, tmp_path) -> None:
 def test_status_reads_persisted_cross_process_progress(monkeypatch, tmp_path) -> None:
     repo = _use_status_repo(monkeypatch, tmp_path)
     repo.start(run_id="from-subprocess")
-    repo.transition(PipelineStage.ANALYSIS, StageState.RUNNING, current=7, total=20)
+    repo.transition(
+        PipelineStage.ANALYSIS,
+        StageState.RUNNING,
+        expected_run_id="from-subprocess",
+        current=7,
+        total=20,
+    )
 
     status = PipelineService.status()
 
@@ -94,6 +105,25 @@ def test_unexpected_subprocess_exception_sets_terminal_failure(monkeypatch, tmp_
     assert result.success is False
     assert "cannot start" in result.details
     assert repo.load().state is PipelineState.FAILED
+
+
+def test_older_service_completion_does_not_terminate_newer_run(
+    monkeypatch, tmp_path
+) -> None:
+    repo = _use_status_repo(monkeypatch, tmp_path)
+
+    def fake_run(*args, **kwargs):
+        assert kwargs["env"]["PIPELINE_RUN_ID"] != "run-b"
+        repo.start(run_id="run-b")
+        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="old failed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = PipelineService().run_once()
+
+    retained = repo.load()
+    assert result.success is False
+    assert retained.run_id == "run-b"
+    assert retained.state is PipelineState.RUNNING
 
 
 def test_run_once_rejects_concurrent_refresh() -> None:

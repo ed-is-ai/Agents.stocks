@@ -12,10 +12,18 @@ def test_repository_round_trip_preserves_order_and_timing(tmp_path) -> None:
     repo = PipelineStatusRepository(path)
 
     status = repo.start(run_id="run-123")
-    repo.transition(PipelineStage.SOURCES, StageState.RUNNING)
-    repo.transition(PipelineStage.SOURCES, StageState.COMPLETE)
-    repo.transition(PipelineStage.MARKET_DATA, StageState.RUNNING)
-    repo.update_counts(scanned=14)
+    repo.transition(
+        PipelineStage.SOURCES, StageState.RUNNING, expected_run_id="run-123"
+    )
+    repo.transition(
+        PipelineStage.SOURCES, StageState.COMPLETE, expected_run_id="run-123"
+    )
+    repo.transition(
+        PipelineStage.MARKET_DATA,
+        StageState.RUNNING,
+        expected_run_id="run-123",
+    )
+    repo.update_counts(scanned=14, expected_run_id="run-123")
     loaded = repo.load()
 
     assert status.run_id == "run-123"
@@ -57,13 +65,66 @@ def test_missing_corrupt_and_unknown_schema_return_idle(tmp_path) -> None:
     assert repo.load().state is PipelineState.IDLE
     path.write_text('{"schema_version": 999}', encoding="utf-8")
     assert repo.load().state is PipelineState.IDLE
+    path.write_text("[]", encoding="utf-8")
+    assert repo.load().state is PipelineState.IDLE
+
+
+def test_structurally_incomplete_stage_list_returns_full_idle_model(tmp_path) -> None:
+    path = tmp_path / "pipeline_status.json"
+    payload = PipelineStatusRepository(path).start(run_id="incomplete").model_dump(
+        mode="json"
+    )
+    payload["stages"] = payload["stages"][:-1]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = PipelineStatusRepository(path).load()
+
+    assert loaded.state is PipelineState.IDLE
+    assert loaded.run_id is None
+    assert [stage.stage for stage in loaded.stages] == list(PipelineStage)
+
+
+def test_older_writer_cannot_mutate_or_finish_newer_run(tmp_path) -> None:
+    repo = PipelineStatusRepository(tmp_path / "pipeline_status.json")
+    repo.start(run_id="run-a")
+    repo.transition(
+        PipelineStage.SOURCES,
+        StageState.RUNNING,
+        expected_run_id="run-a",
+    )
+    repo.start(run_id="run-b")
+
+    attached = repo.start(run_id="run-a", expected_run_id="run-a")
+    repo.transition(
+        PipelineStage.SOURCES,
+        StageState.COMPLETE,
+        expected_run_id="run-a",
+    )
+    repo.update_counts(scanned=99, expected_run_id="run-a")
+    repo.finish(PipelineState.FAILED, expected_run_id="run-a")
+
+    retained = repo.load()
+    assert attached.run_id == "run-b"
+    assert retained.run_id == "run-b"
+    assert retained.state is PipelineState.RUNNING
+    assert retained.scanned == 0
+    assert retained.stage(PipelineStage.SOURCES).state is StageState.PENDING
+
+    repo.transition(
+        PipelineStage.SOURCES,
+        StageState.RUNNING,
+        expected_run_id="run-b",
+    )
+    assert repo.load().stage(PipelineStage.SOURCES).state is StageState.RUNNING
 
 
 def test_stale_running_status_is_recovered_as_failed(tmp_path) -> None:
     path = tmp_path / "pipeline_status.json"
     repo = PipelineStatusRepository(path, stale_after_seconds=60)
     repo.start(run_id="abandoned")
-    repo.transition(PipelineStage.SOURCES, StageState.RUNNING)
+    repo.transition(
+        PipelineStage.SOURCES, StageState.RUNNING, expected_run_id="abandoned"
+    )
     payload = json.loads(path.read_text())
     old = datetime.now(timezone.utc) - timedelta(seconds=61)
     payload["updated_at"] = old.isoformat()
@@ -80,11 +141,19 @@ def test_stale_running_status_is_recovered_as_failed(tmp_path) -> None:
 def test_finish_retains_stage_durations_and_terminal_counts(tmp_path) -> None:
     repo = PipelineStatusRepository(tmp_path / "pipeline_status.json")
     repo.start(run_id="done")
-    repo.transition(PipelineStage.SOURCES, StageState.RUNNING)
-    repo.transition(PipelineStage.SOURCES, StageState.COMPLETE)
+    repo.transition(
+        PipelineStage.SOURCES, StageState.RUNNING, expected_run_id="done"
+    )
+    repo.transition(
+        PipelineStage.SOURCES, StageState.COMPLETE, expected_run_id="done"
+    )
 
     finished = repo.finish(
-        PipelineState.COMPLETE, scanned=10, analysed=8, actionable=2
+        PipelineState.COMPLETE,
+        expected_run_id="done",
+        scanned=10,
+        analysed=8,
+        actionable=2,
     )
 
     assert finished.completed_at is not None
@@ -98,9 +167,21 @@ def test_finish_retains_stage_durations_and_terminal_counts(tmp_path) -> None:
 def test_failure_between_transitions_is_attributed_to_latest_stage(tmp_path) -> None:
     repo = PipelineStatusRepository(tmp_path / "pipeline_status.json")
     repo.start(run_id="failed-between-stages")
-    repo.transition(PipelineStage.SOURCES, StageState.RUNNING)
-    repo.transition(PipelineStage.SOURCES, StageState.COMPLETE)
+    repo.transition(
+        PipelineStage.SOURCES,
+        StageState.RUNNING,
+        expected_run_id="failed-between-stages",
+    )
+    repo.transition(
+        PipelineStage.SOURCES,
+        StageState.COMPLETE,
+        expected_run_id="failed-between-stages",
+    )
 
-    failed = repo.finish(PipelineState.FAILED, error_summary="assembly failed")
+    failed = repo.finish(
+        PipelineState.FAILED,
+        expected_run_id="failed-between-stages",
+        error_summary="assembly failed",
+    )
 
     assert failed.stage(PipelineStage.SOURCES).state is StageState.FAILED

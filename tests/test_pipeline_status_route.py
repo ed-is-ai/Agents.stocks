@@ -15,9 +15,19 @@ def test_pipeline_status_renders_stages_progress_and_active_polling(
     repo = PipelineStatusRepository(tmp_path / "status.json")
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
     repo.start(run_id="web-run")
-    repo.transition(PipelineStage.SOURCES, StageState.RUNNING)
-    repo.transition(PipelineStage.SOURCES, StageState.COMPLETE)
-    repo.transition(PipelineStage.ANALYSIS, StageState.RUNNING, current=3, total=9)
+    repo.transition(
+        PipelineStage.SOURCES, StageState.RUNNING, expected_run_id="web-run"
+    )
+    repo.transition(
+        PipelineStage.SOURCES, StageState.COMPLETE, expected_run_id="web-run"
+    )
+    repo.transition(
+        PipelineStage.ANALYSIS,
+        StageState.RUNNING,
+        expected_run_id="web-run",
+        current=3,
+        total=9,
+    )
 
     response = client.get("/pipeline-status")
 
@@ -32,7 +42,11 @@ def test_pipeline_status_terminal_state_stops_polling(monkeypatch, tmp_path) -> 
     repo = PipelineStatusRepository(tmp_path / "status.json")
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
     repo.start(run_id="web-run")
-    repo.finish(PipelineState.PARTIAL, error_summary="One source failed")
+    repo.finish(
+        PipelineState.PARTIAL,
+        expected_run_id="web-run",
+        error_summary="One source failed",
+    )
 
     response = client.get("/pipeline-status")
 

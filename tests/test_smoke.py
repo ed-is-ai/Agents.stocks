@@ -81,11 +81,27 @@ class TestSmokeTests:
             analysis_out = os.path.join(tmp, "analysis.json")
             excel_out = os.path.join(tmp, "analysis.xlsx")
             status_out = os.path.join(tmp, "pipeline_status.json")
+            alert_lifecycle: list[tuple[str, str]] = []
+
+            def capture_alert_lifecycle(*_args, **_kwargs):
+                with open(status_out) as status_stream:
+                    running_status = json.load(status_stream)
+                by_stage = {
+                    stage["stage"]: stage["state"]
+                    for stage in running_status["stages"]
+                }
+                alert_lifecycle.append((by_stage["alerts"], by_stage["export"]))
+
             with (
                 patch.object(orchestrator, "SCAN_OUTPUT", scan_out),
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
                 patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
+                patch.object(
+                    orchestrator.AlertAgent,
+                    "send_summary_email",
+                    side_effect=capture_alert_lifecycle,
+                ),
             ):
                 pipeline(force=True)
 
@@ -131,6 +147,29 @@ class TestSmokeTests:
                 ):
                     assert previous["completed_at"] <= current["started_at"]
                 assert status_data["scanned"] == status_data["analysed"]
+                assert alert_lifecycle == [("running", "pending")]
+
+            failed_status_out = os.path.join(tmp, "failed_pipeline_status.json")
+            with (
+                patch.object(orchestrator, "PIPELINE_STATUS_JSON", failed_status_out),
+                patch.object(
+                    orchestrator.AlertAgent,
+                    "send_summary_email",
+                    side_effect=RuntimeError("email post-processing failed"),
+                ),
+                patch.object(orchestrator, "_append_run_log"),
+            ):
+                pipeline(force=True)
+
+            with open(failed_status_out) as status_stream:
+                failed_status = json.load(status_stream)
+            failed_stages = {
+                stage["stage"]: stage["state"] for stage in failed_status["stages"]
+            }
+            assert failed_status["state"] == "failed"
+            assert failed_stages["alerts"] == "failed"
+            assert failed_stages["export"] == "skipped"
+            assert failed_status["error_summary"] == "email post-processing failed"
 
     def test_pipeline_persists_failure_at_active_stage(self, tmp_path):
         """Unexpected failures leave a terminal artifact, never stale running UI."""

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utc_now() -> datetime:
@@ -75,10 +76,15 @@ class PipelineStatus(BaseModel):
     actionable: int = 0
     error_summary: str | None = None
 
+    @model_validator(mode="after")
+    def validate_stage_contract(self) -> Self:
+        if [item.stage for item in self.stages] != list(PipelineStage):
+            raise ValueError("pipeline stages must contain every stage in order")
+        return self
+
     @classmethod
     def idle(cls) -> PipelineStatus:
         return cls()
 
     def stage(self, name: PipelineStage) -> StageStatus:
         return next(item for item in self.stages if item.stage is name)
-

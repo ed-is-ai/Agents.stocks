@@ -594,7 +594,14 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             PIPELINE_RUN_TIMEOUT_SECONDS + PIPELINE_STALE_GRACE_SECONDS
         ),
     )
-    status_repo.start(run_id=os.getenv("PIPELINE_RUN_ID"))
+    requested_run_id = os.getenv("PIPELINE_RUN_ID")
+    run_status = status_repo.start(
+        run_id=requested_run_id,
+        expected_run_id=requested_run_id,
+    )
+    run_id = requested_run_id or run_status.run_id
+    if run_id is None:  # PipelineStatus.start always supplies one.
+        raise RuntimeError("Pipeline run ID was not initialized")
 
     if not force and not is_market_hours():
         print(f"[{start_dt.strftime('%H:%M')}] Outside market hours — skipping")
@@ -613,7 +620,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
                 "status": "skipped",
             }
         )
-        status_repo.finish(PipelineState.SKIPPED)
+        status_repo.finish(PipelineState.SKIPPED, expected_run_id=run_id)
         return
 
     print(f"\n{'=' * 50}")
@@ -631,9 +638,11 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
     def report_scanner(stage_name: str, state_name: str, count: int | None) -> None:
         stage = PipelineStage(stage_name)
         state = StageState(state_name)
-        status_repo.transition(stage, state)
+        status_repo.transition(stage, state, expected_run_id=run_id)
         if stage is PipelineStage.ENRICHMENT and state is StageState.COMPLETE:
-            status_repo.update_counts(scanned=count or 0)
+            status_repo.update_counts(
+                scanned=count or 0, expected_run_id=run_id
+            )
 
     def report_analysis(current: int, total: int) -> None:
         nonlocal last_analysis_update
@@ -644,6 +653,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         status_repo.transition(
             PipelineStage.ANALYSIS,
             StageState.RUNNING,
+            expected_run_id=run_id,
             current=current,
             total=total,
         )
@@ -656,7 +666,9 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         }
         stage = mapping[event.step_name]
         if event.phase == "started":
-            status_repo.transition(stage, StageState.RUNNING)
+            status_repo.transition(
+                stage, StageState.RUNNING, expected_run_id=run_id
+            )
             return
         if event.step_name == "scan":
             # Empty scans do not enter ScannerAgent.scan_watchlist; make their
@@ -671,19 +683,36 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
                     StageState.PENDING,
                     StageState.RUNNING,
                 }:
-                    status_repo.transition(scan_stage, StageState.COMPLETE)
-            status_repo.update_counts(scanned=event.output_count or 0)
-        else:
-            status_repo.transition(stage, StageState.COMPLETE)
+                    status_repo.transition(
+                        scan_stage,
+                        StageState.COMPLETE,
+                        expected_run_id=run_id,
+                    )
+            status_repo.update_counts(
+                scanned=event.output_count or 0,
+                expected_run_id=run_id,
+            )
+        elif event.step_name != "alert":
+            status_repo.transition(
+                stage, StageState.COMPLETE, expected_run_id=run_id
+            )
             if event.step_name == "analyse":
-                status_repo.update_counts(analysed=event.output_count or 0)
+                status_repo.update_counts(
+                    analysed=event.output_count or 0,
+                    expected_run_id=run_id,
+                )
 
     try:
-        status_repo.transition(PipelineStage.SOURCES, StageState.RUNNING)
+        status_repo.transition(
+            PipelineStage.SOURCES,
+            StageState.RUNNING,
+            expected_run_id=run_id,
+        )
         if extract:
             status_repo.transition(
                 PipelineStage.SOURCES,
                 StageState.RUNNING,
+                expected_run_id=run_id,
                 substage="extraction",
             )
             ExtractionAgent(name="ExtractionAgent").run()
@@ -744,10 +773,23 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
         sell_alerts = alerter.check_portfolio_stops(positions, stock_map)
         buy_alerts = alert_summary.buy_count
-        status_repo.update_counts(actionable=buy_alerts + sell_alerts)
+        status_repo.update_counts(
+            actionable=buy_alerts + sell_alerts,
+            expected_run_id=run_id,
+        )
         alerter.send_summary_email(positions)
 
-        status_repo.transition(PipelineStage.EXPORT, StageState.RUNNING)
+        status_repo.transition(
+            PipelineStage.ALERTS,
+            StageState.COMPLETE,
+            expected_run_id=run_id,
+        )
+
+        status_repo.transition(
+            PipelineStage.EXPORT,
+            StageState.RUNNING,
+            expected_run_id=run_id,
+        )
 
         with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
             json.dump(scan_payload, stream, indent=2)
@@ -777,9 +819,14 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             )
 
         write_excel(analysis_results, EXCEL_OUTPUT, held, new_tickers=new)
-        status_repo.transition(PipelineStage.EXPORT, StageState.COMPLETE)
+        status_repo.transition(
+            PipelineStage.EXPORT,
+            StageState.COMPLETE,
+            expected_run_id=run_id,
+        )
         status_repo.finish(
             PipelineState.COMPLETE,
+            expected_run_id=run_id,
             scanned=scanned,
             analysed=analysed,
             actionable=buy_alerts + sell_alerts,
@@ -790,6 +837,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         errors.append(traceback.format_exc())
         status_repo.finish(
             PipelineState.FAILED,
+            expected_run_id=run_id,
             scanned=scanned,
             analysed=analysed,
             actionable=buy_alerts + sell_alerts,

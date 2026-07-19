@@ -78,17 +78,17 @@ class PipelineService:
                 success=False,
                 details=f"Pipeline timed out after {_RUN_TIMEOUT_SECONDS}s",
             )
-            self._set_finished(outcome)
+            self._set_finished(outcome, run_id)
             return outcome
         except Exception as error:
             outcome = PipelineRunResult(success=False, details=str(error))
-            self._set_finished(outcome)
+            self._set_finished(outcome, run_id)
             return outcome
         details = (result.stdout or result.stderr).strip()
         persisted = _status_repository.load()
         success = result.returncode == 0 and persisted.state is not PipelineState.FAILED
         outcome = PipelineRunResult(success=success, details=details)
-        self._set_finished(outcome)
+        self._set_finished(outcome, run_id)
         return outcome
 
     @staticmethod
@@ -123,16 +123,18 @@ class PipelineService:
         return warnings
 
     @staticmethod
-    def _set_finished(outcome: PipelineRunResult) -> None:
+    def _set_finished(outcome: PipelineRunResult, run_id: str) -> None:
         current = _status_repository.load()
         if not outcome.success and current.state is not PipelineState.FAILED:
             _status_repository.finish(
                 PipelineState.FAILED,
+                expected_run_id=run_id,
                 error_summary=outcome.details,
             )
         elif outcome.success and current.state is PipelineState.RUNNING:
             _status_repository.finish(
                 PipelineState.COMPLETE,
+                expected_run_id=run_id,
             )
 
     @staticmethod

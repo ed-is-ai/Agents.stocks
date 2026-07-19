@@ -52,6 +52,8 @@ class PipelineStatusRepository:
     def _read(self) -> PipelineStatus:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return PipelineStatus.idle()
             if payload.get("schema_version") != 1:
                 return PipelineStatus.idle()
             return PipelineStatus.model_validate(payload)
@@ -73,15 +75,26 @@ class PipelineStatusRepository:
         finally:
             temporary_path.unlink(missing_ok=True)
 
-    def start(self, *, run_id: str | None = None) -> PipelineStatus:
-        now = self._now()
-        status = PipelineStatus(
-            run_id=run_id or str(uuid4()),
-            state=PipelineState.RUNNING,
-            started_at=now,
-            updated_at=now,
-        )
+    def start(
+        self,
+        *,
+        run_id: str | None = None,
+        expected_run_id: str | None = None,
+    ) -> PipelineStatus:
         with self._lock:
+            current = self._read()
+            if expected_run_id is not None and current.run_id is not None:
+                # A subprocess attaches to the run created by its caller. If a
+                # newer run has replaced it, the old subprocess is no longer
+                # allowed to reset the shared artifact.
+                return current
+            now = self._now()
+            status = PipelineStatus(
+                run_id=run_id or str(uuid4()),
+                state=PipelineState.RUNNING,
+                started_at=now,
+                updated_at=now,
+            )
             self._write(status)
         return status
 
@@ -90,13 +103,17 @@ class PipelineStatusRepository:
         stage: PipelineStage,
         state: StageState,
         *,
+        expected_run_id: str,
         current: int | None = None,
         total: int | None = None,
         substage: str | None = None,
     ) -> PipelineStatus:
         with self._lock:
             status = self._read()
-            if status.state is not PipelineState.RUNNING:
+            if (
+                status.run_id != expected_run_id
+                or status.state is not PipelineState.RUNNING
+            ):
                 return status
             now = self._now()
             item = status.stage(stage)
@@ -124,13 +141,17 @@ class PipelineStatusRepository:
     def update_counts(
         self,
         *,
+        expected_run_id: str,
         scanned: int | None = None,
         analysed: int | None = None,
         actionable: int | None = None,
     ) -> PipelineStatus:
         with self._lock:
             status = self._read()
-            if status.state is not PipelineState.RUNNING:
+            if (
+                status.run_id != expected_run_id
+                or status.state is not PipelineState.RUNNING
+            ):
                 return status
             if scanned is not None:
                 status.scanned = scanned
@@ -148,6 +169,7 @@ class PipelineStatusRepository:
         self,
         state: PipelineState,
         *,
+        expected_run_id: str,
         scanned: int | None = None,
         analysed: int | None = None,
         actionable: int | None = None,
@@ -162,6 +184,8 @@ class PipelineStatusRepository:
             raise ValueError(f"{state} is not a terminal pipeline state")
         with self._lock:
             status = self._read()
+            if status.run_id != expected_run_id:
+                return status
             now = self._now()
             had_running_stage = any(
                 item.state is StageState.RUNNING for item in status.stages
