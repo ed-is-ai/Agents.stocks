@@ -36,6 +36,7 @@ PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
 
 # --- Web / static assets ---------------------------------------------------
 TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
+STATIC_DIR = ROOT_DIR / "app" / "api" / "static"
 
 # --- Reference data --------------------------------------------------------
 TICKER_ALIASES_JSON = ROOT_DIR / "config" / "ticker_aliases.json"
