@@ -2,9 +2,35 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import multiprocessing
+from pathlib import Path
 
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
+
+
+def _stalled_transition(path: str, ready, release) -> None:
+    """Pause process A after its ownership read but before its atomic replace."""
+    repo = PipelineStatusRepository(Path(path))
+    write = repo._write
+
+    def wait_then_write(status) -> None:
+        ready.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("race test was not released")
+        write(status)
+
+    repo._write = wait_then_write  # type: ignore[method-assign]
+    repo.transition(
+        PipelineStage.SOURCES,
+        StageState.RUNNING,
+        expected_run_id="run-a",
+    )
+
+
+def _start_replacement_run(path: str, attempting) -> None:
+    attempting.set()
+    PipelineStatusRepository(Path(path)).start(run_id="run-b")
 
 
 def test_repository_round_trip_preserves_order_and_timing(tmp_path) -> None:
@@ -116,6 +142,42 @@ def test_older_writer_cannot_mutate_or_finish_newer_run(tmp_path) -> None:
         expected_run_id="run-b",
     )
     assert repo.load().stage(PipelineStage.SOURCES).state is StageState.RUNNING
+
+
+def test_read_check_write_is_atomic_across_processes(tmp_path) -> None:
+    """A stale A write cannot land after B replaces the active run."""
+    path = tmp_path / "pipeline_status.json"
+    PipelineStatusRepository(path).start(run_id="run-a")
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+    release = context.Event()
+    replacement_attempting = context.Event()
+    stale_writer = context.Process(
+        target=_stalled_transition,
+        args=(str(path), ready, release),
+    )
+    replacement = context.Process(
+        target=_start_replacement_run,
+        args=(str(path), replacement_attempting),
+    )
+
+    stale_writer.start()
+    try:
+        assert ready.wait(timeout=5)
+        replacement.start()
+        assert replacement_attempting.wait(timeout=5)
+        replacement.join(timeout=0.5)
+    finally:
+        release.set()
+        stale_writer.join(timeout=5)
+        if replacement.pid is not None:
+            replacement.join(timeout=5)
+
+    assert stale_writer.exitcode == 0
+    assert replacement.exitcode == 0
+    retained = PipelineStatusRepository(path).load()
+    assert retained.run_id == "run-b"
+    assert retained.stage(PipelineStage.SOURCES).state is StageState.PENDING
 
 
 def test_stale_running_status_is_recovered_as_failed(tmp_path) -> None:

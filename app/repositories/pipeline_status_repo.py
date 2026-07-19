@@ -1,13 +1,21 @@
-"""Atomic JSON persistence for cross-process pipeline progress."""
+"""Atomic JSON persistence for cross-process pipeline progress.
+
+The application is supported on macOS and Linux. Both provide ``flock(2)``,
+which is used here to serialize each complete read-check-write transaction.
+The lock is advisory, so all status writers must go through this repository.
+"""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
+from typing import Iterator
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -29,6 +37,7 @@ class PipelineStatusRepository:
 
     def __init__(self, path: Path, *, stale_after_seconds: float = 1860) -> None:
         self.path = Path(path)
+        self.lock_path = self.path.with_name(f".{self.path.name}.lock")
         self.stale_after_seconds = stale_after_seconds
         self._lock = threading.RLock()
 
@@ -36,8 +45,19 @@ class PipelineStatusRepository:
     def _now() -> datetime:
         return datetime.now(timezone.utc)
 
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Hold the in-process and POSIX interprocess locks until commit."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, open(self.lock_path, "a+b") as lock_stream:
+            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+
     def load(self) -> PipelineStatus:
-        with self._lock:
+        with self._transaction():
             status = self._read()
             if status.state is PipelineState.RUNNING:
                 now = self._now()
@@ -81,7 +101,7 @@ class PipelineStatusRepository:
         run_id: str | None = None,
         expected_run_id: str | None = None,
     ) -> PipelineStatus:
-        with self._lock:
+        with self._transaction():
             current = self._read()
             if expected_run_id is not None and current.run_id is not None:
                 # A subprocess attaches to the run created by its caller. If a
@@ -108,7 +128,7 @@ class PipelineStatusRepository:
         total: int | None = None,
         substage: str | None = None,
     ) -> PipelineStatus:
-        with self._lock:
+        with self._transaction():
             status = self._read()
             if (
                 status.run_id != expected_run_id
@@ -146,7 +166,7 @@ class PipelineStatusRepository:
         analysed: int | None = None,
         actionable: int | None = None,
     ) -> PipelineStatus:
-        with self._lock:
+        with self._transaction():
             status = self._read()
             if (
                 status.run_id != expected_run_id
@@ -182,7 +202,7 @@ class PipelineStatusRepository:
             PipelineState.SKIPPED,
         }:
             raise ValueError(f"{state} is not a terminal pipeline state")
-        with self._lock:
+        with self._transaction():
             status = self._read()
             if status.run_id != expected_run_id:
                 return status
