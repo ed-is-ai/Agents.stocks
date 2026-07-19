@@ -1,12 +1,23 @@
 import subprocess
 
 import app.services.pipeline_service as pipeline_service_module
+from app.repositories.pipeline_status_repo import PipelineStatusRepository
+from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
 from app.services.pipeline_service import PipelineService
 
 
-def test_run_once_success(monkeypatch) -> None:
+def _use_status_repo(monkeypatch, tmp_path) -> PipelineStatusRepository:
+    repo = PipelineStatusRepository(tmp_path / "pipeline_status.json")
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+    return repo
+
+
+def test_run_once_success(monkeypatch, tmp_path) -> None:
+    repo = _use_status_repo(monkeypatch, tmp_path)
+
     def fake_run(*args, **kwargs):
         assert kwargs.get("timeout")  # timeout must be passed
+        assert kwargs["env"]["PIPELINE_RUN_ID"]
         return subprocess.CompletedProcess(args, returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -14,9 +25,11 @@ def test_run_once_success(monkeypatch) -> None:
     assert result.success is True
     assert result.details == "ok"
     assert PipelineService.status()["state"] == "complete"
+    assert repo.load().run_id is not None
 
 
-def test_run_once_failure_uses_stderr(monkeypatch) -> None:
+def test_run_once_failure_uses_stderr(monkeypatch, tmp_path) -> None:
+    _use_status_repo(monkeypatch, tmp_path)
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="boom")
 
@@ -27,7 +40,24 @@ def test_run_once_failure_uses_stderr(monkeypatch) -> None:
     assert PipelineService.status()["state"] == "failed"
 
 
-def test_run_once_timeout_returns_failure(monkeypatch) -> None:
+def test_nonzero_exit_overrides_premature_complete_status(monkeypatch, tmp_path) -> None:
+    repo = _use_status_repo(monkeypatch, tmp_path)
+
+    def fake_run(*args, **kwargs):
+        repo.transition(PipelineStage.EXPORT, StageState.RUNNING)
+        repo.transition(PipelineStage.EXPORT, StageState.COMPLETE)
+        repo.finish(PipelineState.COMPLETE)
+        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="log failed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = PipelineService().run_once()
+
+    assert result.success is False
+    assert repo.load().state is PipelineState.FAILED
+
+
+def test_run_once_timeout_returns_failure(monkeypatch, tmp_path) -> None:
+    repo = _use_status_repo(monkeypatch, tmp_path)
     def fake_run(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 0))
 
@@ -36,6 +66,34 @@ def test_run_once_timeout_returns_failure(monkeypatch) -> None:
     assert result.success is False
     assert "timed out" in result.details.lower()
     assert PipelineService.status()["state"] == "failed"
+    assert repo.load().completed_at is not None
+
+
+def test_status_reads_persisted_cross_process_progress(monkeypatch, tmp_path) -> None:
+    repo = _use_status_repo(monkeypatch, tmp_path)
+    repo.start(run_id="from-subprocess")
+    repo.transition(PipelineStage.ANALYSIS, StageState.RUNNING, current=7, total=20)
+
+    status = PipelineService.status()
+
+    assert status["run_id"] == "from-subprocess"
+    assert status["current_stage"] == "analysis"
+    assert status["analysis_current"] == 7
+    assert status["analysis_total"] == 20
+
+
+def test_unexpected_subprocess_exception_sets_terminal_failure(monkeypatch, tmp_path) -> None:
+    repo = _use_status_repo(monkeypatch, tmp_path)
+
+    def fake_run(*args, **kwargs):
+        raise OSError("cannot start")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = PipelineService().run_once()
+
+    assert result.success is False
+    assert "cannot start" in result.details
+    assert repo.load().state is PipelineState.FAILED
 
 
 def test_run_once_rejects_concurrent_refresh() -> None:

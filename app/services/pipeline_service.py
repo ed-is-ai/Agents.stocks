@@ -9,17 +9,27 @@ orchestrator's ``--once`` entry point so the run executes in its own process
 import subprocess
 import sys
 import threading
-from datetime import datetime, timezone
+import os
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from app.core.config import ANALYSIS_PROGRESS_TXT, ROOT_DIR
+from app.core.config import (
+    PIPELINE_RUN_TIMEOUT_SECONDS,
+    PIPELINE_STALE_GRACE_SECONDS,
+    PIPELINE_STATUS_JSON,
+    ROOT_DIR,
+)
+from app.repositories.pipeline_status_repo import PipelineStatusRepository
+from app.schemas.pipeline_status import PipelineStage, PipelineState
 
-_RUN_TIMEOUT_SECONDS = 1800  # 30 min safety cap; a normal run is far shorter
-_status_lock = threading.Lock()
+_RUN_TIMEOUT_SECONDS = PIPELINE_RUN_TIMEOUT_SECONDS
 _run_lock = threading.Lock()
-_status: dict[str, str] = {"state": "idle", "message": "Ready to refresh data"}
+_status_repository = PipelineStatusRepository(
+    PIPELINE_STATUS_JSON,
+    stale_after_seconds=_RUN_TIMEOUT_SECONDS + PIPELINE_STALE_GRACE_SECONDS,
+)
 
 # The web entry point does not otherwise load .env (the subprocess does), but
 # preflight must inspect the same configuration the pipeline will receive.
@@ -50,13 +60,10 @@ class PipelineService:
 
     def _run_once_locked(self) -> PipelineRunResult:
         """Run one refresh while holding the process-wide single-run lock."""
-        with _status_lock:
-            _status.update(
-                state="running",
-                message="Scanning sources and market data…",
-                started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            )
-        ANALYSIS_PROGRESS_TXT.unlink(missing_ok=True)
+        run_id = str(uuid4())
+        _status_repository.start(run_id=run_id)
+        environment = os.environ.copy()
+        environment["PIPELINE_RUN_ID"] = run_id
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "app.orchestration.orchestrator", "--once"],
@@ -64,6 +71,7 @@ class PipelineService:
                 capture_output=True,
                 text=True,
                 timeout=_RUN_TIMEOUT_SECONDS,
+                env=environment,
             )
         except subprocess.TimeoutExpired:
             outcome = PipelineRunResult(
@@ -72,8 +80,14 @@ class PipelineService:
             )
             self._set_finished(outcome)
             return outcome
+        except Exception as error:
+            outcome = PipelineRunResult(success=False, details=str(error))
+            self._set_finished(outcome)
+            return outcome
         details = (result.stdout or result.stderr).strip()
-        outcome = PipelineRunResult(success=result.returncode == 0, details=details)
+        persisted = _status_repository.load()
+        success = result.returncode == 0 and persisted.state is not PipelineState.FAILED
+        outcome = PipelineRunResult(success=success, details=details)
         self._set_finished(outcome)
         return outcome
 
@@ -110,19 +124,25 @@ class PipelineService:
 
     @staticmethod
     def _set_finished(outcome: PipelineRunResult) -> None:
-        with _status_lock:
-            _status.update(
-                state="complete" if outcome.success else "failed",
-                message="Refresh complete" if outcome.success else outcome.details,
+        current = _status_repository.load()
+        if not outcome.success and current.state is not PipelineState.FAILED:
+            _status_repository.finish(
+                PipelineState.FAILED,
+                error_summary=outcome.details,
+            )
+        elif outcome.success and current.state is PipelineState.RUNNING:
+            _status_repository.finish(
+                PipelineState.COMPLETE,
             )
 
     @staticmethod
-    def status() -> dict[str, str]:
-        """Return the current run state and the latest analyst progress line."""
-        with _status_lock:
-            result = dict(_status)
-        if result["state"] == "running" and ANALYSIS_PROGRESS_TXT.exists():
-            lines = ANALYSIS_PROGRESS_TXT.read_text(encoding="utf-8").splitlines()
-            if lines:
-                result["message"] = lines[-1]
+    def status() -> dict[str, object]:
+        """Return the persisted cross-process run status for web rendering."""
+        status = _status_repository.load()
+        result = status.model_dump(mode="json")
+        for item, model in zip(result["stages"], status.stages, strict=True):
+            item["label"] = model.stage.label
+        analysis = status.stage(PipelineStage.ANALYSIS)
+        result["analysis_current"] = analysis.current
+        result["analysis_total"] = analysis.total
         return result

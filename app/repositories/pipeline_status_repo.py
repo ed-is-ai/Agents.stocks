@@ -1,0 +1,230 @@
+"""Atomic JSON persistence for cross-process pipeline progress."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import tempfile
+import threading
+from uuid import uuid4
+
+from pydantic import ValidationError
+
+from app.schemas.pipeline_status import (
+    PipelineStage,
+    PipelineState,
+    PipelineStatus,
+    StageState,
+)
+
+
+class PipelineStatusRepository:
+    """Read and atomically replace the status artifact.
+
+    Missing, corrupt, and unsupported artifacts are deliberately treated as
+    idle so status rendering cannot take down the web application.
+    """
+
+    def __init__(self, path: Path, *, stale_after_seconds: float = 1860) -> None:
+        self.path = Path(path)
+        self.stale_after_seconds = stale_after_seconds
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def load(self) -> PipelineStatus:
+        with self._lock:
+            status = self._read()
+            if status.state is PipelineState.RUNNING:
+                now = self._now()
+                age = (now - status.updated_at).total_seconds()
+                if age > self.stale_after_seconds:
+                    status = self._recover_interrupted(status)
+                    self._write(status)
+                else:
+                    status.elapsed_seconds = self._elapsed(status, now)
+            return status
+
+    def _read(self) -> PipelineStatus:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if payload.get("schema_version") != 1:
+                return PipelineStatus.idle()
+            return PipelineStatus.model_validate(payload)
+        except (OSError, json.JSONDecodeError, TypeError, ValidationError):
+            return PipelineStatus.idle()
+
+    def _write(self, status: PipelineStatus) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp"
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(status.model_dump(mode="json"), stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, self.path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def start(self, *, run_id: str | None = None) -> PipelineStatus:
+        now = self._now()
+        status = PipelineStatus(
+            run_id=run_id or str(uuid4()),
+            state=PipelineState.RUNNING,
+            started_at=now,
+            updated_at=now,
+        )
+        with self._lock:
+            self._write(status)
+        return status
+
+    def transition(
+        self,
+        stage: PipelineStage,
+        state: StageState,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+        substage: str | None = None,
+    ) -> PipelineStatus:
+        with self._lock:
+            status = self._read()
+            if status.state is not PipelineState.RUNNING:
+                return status
+            now = self._now()
+            item = status.stage(stage)
+            if state is StageState.RUNNING:
+                item.started_at = item.started_at or now
+                status.current_stage = stage
+            if state in {StageState.COMPLETE, StageState.SKIPPED, StageState.FAILED}:
+                item.started_at = item.started_at or now
+                item.completed_at = now
+                item.duration_seconds = round(
+                    (now - item.started_at).total_seconds(), 3
+                )
+            item.state = state
+            if current is not None:
+                item.current = current
+            if total is not None:
+                item.total = total
+            if substage is not None:
+                item.substage = substage
+            status.updated_at = now
+            status.elapsed_seconds = self._elapsed(status, now)
+            self._write(status)
+            return status
+
+    def update_counts(
+        self,
+        *,
+        scanned: int | None = None,
+        analysed: int | None = None,
+        actionable: int | None = None,
+    ) -> PipelineStatus:
+        with self._lock:
+            status = self._read()
+            if status.state is not PipelineState.RUNNING:
+                return status
+            if scanned is not None:
+                status.scanned = scanned
+            if analysed is not None:
+                status.analysed = analysed
+            if actionable is not None:
+                status.actionable = actionable
+            now = self._now()
+            status.updated_at = now
+            status.elapsed_seconds = self._elapsed(status, now)
+            self._write(status)
+            return status
+
+    def finish(
+        self,
+        state: PipelineState,
+        *,
+        scanned: int | None = None,
+        analysed: int | None = None,
+        actionable: int | None = None,
+        error_summary: str | None = None,
+    ) -> PipelineStatus:
+        if state not in {
+            PipelineState.COMPLETE,
+            PipelineState.PARTIAL,
+            PipelineState.FAILED,
+            PipelineState.SKIPPED,
+        }:
+            raise ValueError(f"{state} is not a terminal pipeline state")
+        with self._lock:
+            status = self._read()
+            now = self._now()
+            had_running_stage = any(
+                item.state is StageState.RUNNING for item in status.stages
+            )
+            for item in status.stages:
+                if item.state is StageState.RUNNING:
+                    item.state = (
+                        StageState.FAILED
+                        if state is PipelineState.FAILED
+                        else StageState.COMPLETE
+                    )
+                    item.completed_at = now
+                    item.duration_seconds = round(
+                        (now - (item.started_at or now)).total_seconds(), 3
+                    )
+                elif item.state is StageState.PENDING:
+                    item.state = StageState.SKIPPED
+            if (
+                state is PipelineState.FAILED
+                and not had_running_stage
+                and status.current_stage is not None
+            ):
+                # A failure can occur between a substage's completion and the
+                # next transition. Attribute it to the latest active stage.
+                status.stage(status.current_stage).state = StageState.FAILED
+            status.state = state
+            status.completed_at = now
+            status.updated_at = now
+            status.elapsed_seconds = self._elapsed(status, now)
+            status.error_summary = self._safe_error(error_summary)
+            if scanned is not None:
+                status.scanned = scanned
+            if analysed is not None:
+                status.analysed = analysed
+            if actionable is not None:
+                status.actionable = actionable
+            self._write(status)
+            return status
+
+    def _recover_interrupted(self, status: PipelineStatus) -> PipelineStatus:
+        now = self._now()
+        if status.current_stage is not None:
+            item = status.stage(status.current_stage)
+            item.state = StageState.FAILED
+            item.completed_at = now
+            item.duration_seconds = round(
+                (now - (item.started_at or status.started_at or now)).total_seconds(), 3
+            )
+        status.state = PipelineState.FAILED
+        status.completed_at = now
+        status.updated_at = now
+        status.elapsed_seconds = self._elapsed(status, now)
+        status.error_summary = "Pipeline interrupted before completion."
+        return status
+
+    @staticmethod
+    def _elapsed(status: PipelineStatus, now: datetime) -> float:
+        if status.started_at is None:
+            return 0.0
+        return round(max(0.0, (now - status.started_at).total_seconds()), 1)
+
+    @staticmethod
+    def _safe_error(error: str | None) -> str | None:
+        if not error:
+            return None
+        return " ".join(error.split())[:500]

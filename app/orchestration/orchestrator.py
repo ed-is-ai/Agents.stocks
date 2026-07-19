@@ -10,6 +10,8 @@ Runs the MS Agent framework pipeline on market hours.
 import argparse
 import csv
 import json
+import os
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,10 +47,16 @@ from app.schemas import StockRecord
 from app.core.config import (
     ANALYSIS_JSON,
     ANALYSIS_XLSX,
+    PIPELINE_RUN_TIMEOUT_SECONDS,
     PIPELINE_RUNS_CSV,
+    PIPELINE_STALE_GRACE_SECONDS,
+    PIPELINE_STATUS_JSON,
     PORTFOLIO_VALUE_CSV,
     SCAN_RESULTS_JSON,
 )
+from app.repositories.pipeline_status_repo import PipelineStatusRepository
+from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
+from app.workflows.pipeline import PipelineStepEvent
 
 
 SCAN_OUTPUT = SCAN_RESULTS_JSON
@@ -580,6 +588,13 @@ def is_market_hours() -> bool:
 
 def pipeline(force: bool = False, extract: bool = False) -> None:
     start_dt = datetime.now(timezone.utc)
+    status_repo = PipelineStatusRepository(
+        PIPELINE_STATUS_JSON,
+        stale_after_seconds=(
+            PIPELINE_RUN_TIMEOUT_SECONDS + PIPELINE_STALE_GRACE_SECONDS
+        ),
+    )
+    status_repo.start(run_id=os.getenv("PIPELINE_RUN_ID"))
 
     if not force and not is_market_hours():
         print(f"[{start_dt.strftime('%H:%M')}] Outside market hours — skipping")
@@ -598,6 +613,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
                 "status": "skipped",
             }
         )
+        status_repo.finish(PipelineState.SKIPPED)
         return
 
     print(f"\n{'=' * 50}")
@@ -610,21 +626,80 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
     buy_alerts = 0
     sell_alerts = 0
     src_summary = ""
+    last_analysis_update = 0.0
+
+    def report_scanner(stage_name: str, state_name: str, count: int | None) -> None:
+        stage = PipelineStage(stage_name)
+        state = StageState(state_name)
+        status_repo.transition(stage, state)
+        if stage is PipelineStage.ENRICHMENT and state is StageState.COMPLETE:
+            status_repo.update_counts(scanned=count or 0)
+
+    def report_analysis(current: int, total: int) -> None:
+        nonlocal last_analysis_update
+        now = time.monotonic()
+        if current != total and now - last_analysis_update < 1:
+            return
+        last_analysis_update = now
+        status_repo.transition(
+            PipelineStage.ANALYSIS,
+            StageState.RUNNING,
+            current=current,
+            total=total,
+        )
+
+    def report_step(event: PipelineStepEvent) -> None:
+        mapping = {
+            "scan": PipelineStage.SOURCES,
+            "analyse": PipelineStage.ANALYSIS,
+            "alert": PipelineStage.ALERTS,
+        }
+        stage = mapping[event.step_name]
+        if event.phase == "started":
+            status_repo.transition(stage, StageState.RUNNING)
+            return
+        if event.step_name == "scan":
+            # Empty scans do not enter ScannerAgent.scan_watchlist; make their
+            # downstream scan substages explicit rather than leaving them pending.
+            current = status_repo.load()
+            for scan_stage in (
+                PipelineStage.SOURCES,
+                PipelineStage.MARKET_DATA,
+                PipelineStage.ENRICHMENT,
+            ):
+                if current.stage(scan_stage).state in {
+                    StageState.PENDING,
+                    StageState.RUNNING,
+                }:
+                    status_repo.transition(scan_stage, StageState.COMPLETE)
+            status_repo.update_counts(scanned=event.output_count or 0)
+        else:
+            status_repo.transition(stage, StageState.COMPLETE)
+            if event.step_name == "analyse":
+                status_repo.update_counts(analysed=event.output_count or 0)
 
     try:
+        status_repo.transition(PipelineStage.SOURCES, StageState.RUNNING)
         if extract:
+            status_repo.transition(
+                PipelineStage.SOURCES,
+                StageState.RUNNING,
+                substage="extraction",
+            )
             ExtractionAgent(name="ExtractionAgent").run()
         watchlist = load_watchlist()
         source_map = load_source_map()
 
-        scanner = ScannerAgent(name="ScannerAgent")
-        analyst = AnalystAgent()
+        scanner = ScannerAgent(
+            name="ScannerAgent", progress_callback=report_scanner
+        )
+        analyst = AnalystAgent(progress_callback=report_analysis)
         alerter = AlertAgent(name="AlertAgent")
         # Inject the agents so the same alerter is reused below for portfolio
         # stop checks and the summary email.
         momentum = build_momentum_pipeline(scanner, analyst, alerter)
 
-        alert_summary, trace = momentum.run_traced(watchlist)
+        alert_summary, trace = momentum.run_traced(watchlist, progress=report_step)
         scan_results = trace[0][1]
         analysis_results = trace[1][1]
         scanned = len(scan_results)
@@ -649,9 +724,6 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
                 "results": items,
             }
 
-        with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
-            json.dump(scan_payload, stream, indent=2)
-
         src_summary = ", ".join(
             f"{k}:{len(v['results'])}"
             f" ({scanner.source_status.get(k, 'ok')})"  # type: ignore[index]
@@ -659,11 +731,6 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             if isinstance(v, dict)
         )
         print(f"      Scanned {scanned} tickers ({src_summary})")
-
-        with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
-            json.dump(
-                [item.model_dump() for item in analysis_results], stream, indent=2
-            )
 
         _trader = TraderAgent(name="TraderAgent")
         stock_map = {r.ticker: r for r in analysis_results}
@@ -677,7 +744,18 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
         sell_alerts = alerter.check_portfolio_stops(positions, stock_map)
         buy_alerts = alert_summary.buy_count
+        status_repo.update_counts(actionable=buy_alerts + sell_alerts)
         alerter.send_summary_email(positions)
+
+        status_repo.transition(PipelineStage.EXPORT, StageState.RUNNING)
+
+        with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
+            json.dump(scan_payload, stream, indent=2)
+
+        with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
+            json.dump(
+                [item.model_dump() for item in analysis_results], stream, indent=2
+            )
 
         current_tickers = [r.ticker for r in analysis_results]
         history = load_history()
@@ -699,10 +777,24 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             )
 
         write_excel(analysis_results, EXCEL_OUTPUT, held, new_tickers=new)
+        status_repo.transition(PipelineStage.EXPORT, StageState.COMPLETE)
+        status_repo.finish(
+            PipelineState.COMPLETE,
+            scanned=scanned,
+            analysed=analysed,
+            actionable=buy_alerts + sell_alerts,
+        )
         print("\nPipeline complete.")
 
-    except Exception:
+    except Exception as error:
         errors.append(traceback.format_exc())
+        status_repo.finish(
+            PipelineState.FAILED,
+            scanned=scanned,
+            analysed=analysed,
+            actionable=buy_alerts + sell_alerts,
+            error_summary=str(error),
+        )
         print(f"\n[ERROR] Pipeline failed:\n{errors[-1]}")
 
     finally:

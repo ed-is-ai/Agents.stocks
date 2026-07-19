@@ -80,10 +80,12 @@ class TestSmokeTests:
             scan_out = os.path.join(tmp, "scan.json")
             analysis_out = os.path.join(tmp, "analysis.json")
             excel_out = os.path.join(tmp, "analysis.xlsx")
+            status_out = os.path.join(tmp, "pipeline_status.json")
             with (
                 patch.object(orchestrator, "SCAN_OUTPUT", scan_out),
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
+                patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
             ):
                 pipeline(force=True)
 
@@ -109,6 +111,46 @@ class TestSmokeTests:
                 assert len(analysis_data) > 0
                 assert "analysis" in analysis_data[0]
                 assert "score" in analysis_data[0]["analysis"]
+
+            with open(status_out) as f:
+                status_data = json.load(f)
+                assert status_data["state"] == "complete"
+                assert [stage["stage"] for stage in status_data["stages"]] == [
+                    "sources",
+                    "market_data",
+                    "enrichment",
+                    "analysis",
+                    "alerts",
+                    "export",
+                ]
+                assert all(
+                    stage["state"] == "complete" for stage in status_data["stages"]
+                )
+                for previous, current in zip(
+                    status_data["stages"], status_data["stages"][1:], strict=False
+                ):
+                    assert previous["completed_at"] <= current["started_at"]
+                assert status_data["scanned"] == status_data["analysed"]
+
+    def test_pipeline_persists_failure_at_active_stage(self, tmp_path):
+        """Unexpected failures leave a terminal artifact, never stale running UI."""
+        import app.orchestration.orchestrator as orchestrator
+
+        status_out = tmp_path / "pipeline_status.json"
+        with (
+            patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
+            patch.object(
+                orchestrator, "load_watchlist", side_effect=OSError("bad input")
+            ),
+            patch.object(orchestrator, "_append_run_log"),
+        ):
+            pipeline(force=True)
+
+        status_data = json.loads(status_out.read_text())
+        assert status_data["state"] == "failed"
+        assert status_data["current_stage"] == "sources"
+        assert status_data["stages"][0]["state"] == "failed"
+        assert status_data["error_summary"] == "bad input"
 
     @patch(
         "app.agents.scanner.scanner_agent.fetch_tv_screener_result",

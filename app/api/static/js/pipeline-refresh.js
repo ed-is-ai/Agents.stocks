@@ -9,6 +9,19 @@
   }
 
   document.body.addEventListener('htmx:beforeRequest', (event) => {
+    const requestPath = event.detail.requestConfig?.path
+      || event.detail.pathInfo?.requestPath
+      || event.detail.elt?.getAttribute('hx-post');
+    if (requestPath === '/refresh-data') {
+      // Give the service time to create the durable run artifact, then let the
+      // running status partial own its two-second polling lifecycle.
+      window.setTimeout(() => {
+        htmx.ajax('GET', '/pipeline-status', {
+          target: '#pipeline-status',
+          swap: 'innerHTML'
+        });
+      }, 250);
+    }
     if (event.detail.elt === refreshButton) setRunning(true);
   });
 
