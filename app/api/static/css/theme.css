@@ -41,7 +41,7 @@
     Consolas, monospace;
 
   /* Modular type scale (~1.15 ratio), documented steps */
-  --fs-2xs: 0.66rem;
+  --fs-2xs: 0.7rem;
   --fs-xs: 0.74rem;
   --fs-sm: 0.82rem;
   --fs-base: 0.9rem;

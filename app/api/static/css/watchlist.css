@@ -1,4 +1,18 @@
 /* Watchlist-specific presentation. Keep discovery and responsive UI here. */
+
+/* Secondary line inside a merged cell (e.g. CANSLIM/Momentum under Score,
+ * the vs-entry / vs-stop delta under a price). */
+.cell-sub {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.cell-sub .hi { color: var(--green); font-weight: var(--fw-semibold); }
+.cell-sub .lo { color: var(--red); font-weight: var(--fw-semibold); }
+
 a.ticker {
   color: var(--primary);
   font-weight: var(--fw-bold);
