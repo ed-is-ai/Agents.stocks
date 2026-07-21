@@ -34,11 +34,16 @@
       <input type="search" id="wl-search" placeholder="Search ticker / sector"
              aria-label="Search ticker or sector" autocomplete="off">
     </label>
-    <button class="btn-filter" data-filter="breakout" type="button">VCP Breakout</button>
-    <button class="btn-filter" data-filter="myb" type="button">MYB</button>
-    <button class="btn-filter" data-filter="sepa8" type="button">SEPA 8</button>
-    <button class="btn-filter" data-filter="alert" type="button">Stay Alert</button>
-    <button class="btn-filter" data-filter="uk" type="button">UK</button>
+    <button class="btn-filter" data-filter="breakout" type="button" aria-pressed="false"
+            title="Entry zone transitioned to broken_out this run">Fresh VCP breakout</button>
+    <button class="btn-filter" data-filter="myb" type="button" aria-pressed="false"
+            title="Cleared its multi-year base pivot price">Multi-year base breakout</button>
+    <button class="btn-filter" data-filter="sepa8" type="button" aria-pressed="false"
+            title="Meets all 8/8 Minervini SEPA trend template conditions">SEPA trend template 8/8</button>
+    <button class="btn-filter" data-filter="alert" type="button" aria-pressed="false"
+            title="Stage 2, approaching entry with score ≥ 5 — watch for a breakout">Approaching entry</button>
+    <button class="btn-filter" data-filter="uk" type="button" aria-pressed="false"
+            title="Tickers listed on the London Stock Exchange (.L)">UK listings</button>
     <!-- Ranges / Columns / Views / Reset controls are mounted here by watchlist.js -->
     <div class="wl-adv" id="wl-adv"></div>
   </div>

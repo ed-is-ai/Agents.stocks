@@ -408,7 +408,9 @@
     const search = document.getElementById('wl-search');
     if (search) search.value = state.query;
     document.querySelectorAll('#wl-toolbar [data-filter]').forEach((btn) => {
-      btn.classList.toggle('active', state.filters.includes(btn.dataset.filter));
+      const on = state.filters.includes(btn.dataset.filter);
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', String(on));
     });
   }
 
@@ -470,7 +472,9 @@
       const filter = toggle.dataset.filter;
       if (state.filters.includes(filter)) state.filters = state.filters.filter((f) => f !== filter);
       else state.filters.push(filter);
-      toggle.classList.toggle('active', state.filters.includes(filter));
+      const on = state.filters.includes(filter);
+      toggle.classList.toggle('active', on);
+      toggle.setAttribute('aria-pressed', String(on));
       state.presetId = null;
       apply();
       return;
