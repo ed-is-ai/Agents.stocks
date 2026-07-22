@@ -92,8 +92,32 @@ def _sample_records() -> list[StockRecord]:
 
 
 def _render_watchlist() -> str:
+    from app.core.alerting import build_alert_ui_state
+    from app.core.recommendation import classify_recommendation
+    from app.services.freshness_service import calculate_freshness
+
+    records = _sample_records()
+    portfolio_tickers = {"AAPL.L"}
+    recommendations = {
+        record.ticker: classify_recommendation(
+            record, is_portfolio_holding=record.ticker in portfolio_tickers
+        )
+        for record in records
+    }
+    alert_states = {
+        record.ticker: build_alert_ui_state(
+            record, has_watching=False, last_alerted_at=None
+        )
+        for record in records
+    }
     return templates.get_template("_watchlist.html").render(
-        records=_sample_records(), portfolio_tickers={"AAPL.L"}
+        records=records,
+        portfolio_tickers=portfolio_tickers,
+        recommendations=recommendations,
+        alert_states=alert_states,
+        freshness=calculate_freshness(None),
+        source_health=[],
+        latest_attempt_error=None,
     )
 
 
@@ -135,8 +159,9 @@ def test_watchlist_cells_carry_canonical_numeric_data_values() -> None:
     assert 'data-col="momentum" data-val="11"' in html
     assert 'data-col="sepa" data-val="8"' in html
     assert 'data-col="risk" data-val="8.0000"' in html
-    # The Buy-recommendation row exposes its actionability rank for sorting.
-    assert 'data-col="rec" data-val="6"' in html
+    # The Buy-recommendation row exposes its actionability rank for sorting
+    # (mirrors app.core.recommendation._BUCKET_RANK, the canonical source).
+    assert 'data-col="rec" data-val="5"' in html
 
 
 def test_watchlist_missing_values_render_empty_data_val() -> None:
