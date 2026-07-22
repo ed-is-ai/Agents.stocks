@@ -87,7 +87,6 @@ def _sample_records() -> list[StockRecord]:
 def _render_watchlist() -> str:
     from app.core.alerting import build_alert_ui_state
     from app.core.recommendation import classify_recommendation
-    from app.services.freshness_service import calculate_freshness
 
     records = _sample_records()
     portfolio_tickers = {"AAPL.L"}
@@ -108,9 +107,6 @@ def _render_watchlist() -> str:
         portfolio_tickers=portfolio_tickers,
         recommendations=recommendations,
         alert_states=alert_states,
-        freshness=calculate_freshness(None),
-        source_health=[],
-        latest_attempt_error=None,
     )
 
 
