@@ -119,6 +119,44 @@ def test_update_preserves_comments_blank_lines_and_unrelated_order(tmp_path) -> 
     assert "FMP_API_KEY=old" not in content
 
 
+def test_status_strips_trailing_inline_comment_from_an_unquoted_value(
+    tmp_path,
+) -> None:
+    """Regression: EMAIL_PORT=587  # STARTTLS must parse as "587", not the
+    whole comment — an earlier bug let the comment leak into the parsed
+    value, which then failed EMAIL_PORT's numeric validation on save."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "EMAIL_HOST=smtp.gmail.com        # change for Outlook:\n"
+        "EMAIL_PORT=587                    # 587 = STARTTLS; 465 = SSL\n",
+        encoding="utf-8",
+    )
+    service = IntegrationConfigService(env_path)
+
+    status = service.status()
+
+    assert status["EMAIL_HOST"]["value"] == "smtp.gmail.com"
+    assert status["EMAIL_PORT"]["value"] == "587"
+
+
+def test_status_preserves_hash_inside_a_quoted_value(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'EMAIL_HOST="smtp.example.com # not a comment"\n', encoding="utf-8"
+    )
+    service = IntegrationConfigService(env_path)
+
+    assert service.status()["EMAIL_HOST"]["value"] == "smtp.example.com # not a comment"
+
+
+def test_value_starting_with_hash_and_no_content_parses_as_blank(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("EMAIL_HOST=# just a comment\n", encoding="utf-8")
+    service = IntegrationConfigService(env_path)
+
+    assert service.status()["EMAIL_HOST"]["configured"] is False
+
+
 def test_malformed_line_is_preserved_without_being_parsed(tmp_path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("this line has no equals sign\n", encoding="utf-8")

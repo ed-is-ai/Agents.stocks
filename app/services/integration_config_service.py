@@ -80,11 +80,31 @@ def _line_key(line: str) -> str | None:
     return key or None
 
 
+def _strip_inline_comment(raw: str) -> str:
+    """Drop a trailing ``# comment`` from an unquoted ``.env`` value.
+
+    Matches the common convention (and this repo's own ``.env``) of
+    annotating a value on the same line, e.g. ``EMAIL_PORT=587  # STARTTLS``
+    — without this, the parsed value would include the comment text.
+    """
+    if raw.startswith("#"):
+        return ""
+    for marker in (" #", "\t#"):
+        index = raw.find(marker)
+        if index != -1:
+            raw = raw[:index]
+    return raw
+
+
 def _line_value(line: str) -> str:
     raw = line.split("=", 1)[1].strip()
-    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
-        return raw[1:-1]
-    return raw
+    if raw[:1] in ('"', "'"):
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        if end != -1:
+            return raw[1:end]
+        return raw[1:]
+    return _strip_inline_comment(raw).strip()
 
 
 def _serialize_value(value: str) -> str:
