@@ -288,13 +288,17 @@
     /* Reserve room for the fixed pipeline status bar (incl. its own
        safe-area padding) so it never sits over the last table row. */
     body { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
-    .pipeline-confirmation { position: fixed; inset: 0; z-index: 1050; display: grid; place-items: center; background: rgba(15, 23, 42, .42); padding: 1rem; }
-    .pipeline-confirmation-card { width: min(32rem, 100%); background: white; border-radius: .65rem; box-shadow: 0 20px 50px rgba(0,0,0,.24); padding: 1.3rem; }
-    .pipeline-confirmation h2 { font-size: 1rem; font-weight: 700; color: var(--amber); margin: 0 0 .75rem; }
-    .pipeline-confirmation ul { padding-left: 1.2rem; margin-bottom: .9rem; font-size: .85rem; }
-    .pipeline-confirmation li { margin-bottom: .55rem; }
-    .pipeline-confirmation li span { color: var(--muted); }
-    .pipeline-confirmation-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+    #pipelineConfirmationTitle { font-size: 1rem; font-weight: 700; color: var(--amber); display: flex; align-items: center; gap: .4rem; }
+    .pipeline-warning-list { padding-left: 0; list-style: none; margin-bottom: .9rem; font-size: .85rem; }
+    .pipeline-warning { margin-bottom: .6rem; padding: .5rem .65rem; border-radius: .4rem; border-left: 3px solid var(--border); background: var(--surface); }
+    .pipeline-warning span { color: var(--muted); }
+    .pipeline-warning-category { display: block; font-size: var(--fs-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; margin-bottom: .15rem; }
+    .pipeline-warning-critical { border-left-color: var(--red); }
+    .pipeline-warning-critical .pipeline-warning-category { color: var(--red); }
+    .pipeline-warning-moderate { border-left-color: var(--amber); }
+    .pipeline-warning-moderate .pipeline-warning-category { color: var(--amber); }
+    .pipeline-warning-low { border-left-color: var(--muted); }
+    .pipeline-warning-low .pipeline-warning-category { color: var(--muted); }
   </style>
 </head>
 <body>

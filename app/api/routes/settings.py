@@ -43,12 +43,22 @@ def _settings_context(
     return context
 
 
+def _no_store_settings_response(request: Request, **context: object) -> HTMLResponse:
+    """Render ``_settings.html`` with ``Cache-Control: no-store``.
+
+    The response exposes configured/missing state (never values) — still
+    worth keeping out of any cache so a shared/back-forward cache can't
+    surface one user's configuration state to another (#45).
+    """
+    response = templates.TemplateResponse(request, "_settings.html", context=context)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @router.get("/partials/settings", response_class=HTMLResponse)
 async def partial_settings(request: Request, config: ConfigDep) -> HTMLResponse:
     """Render the Settings/Integrations tab."""
-    return templates.TemplateResponse(
-        request, "_settings.html", context=_settings_context(config)
-    )
+    return _no_store_settings_response(request, **_settings_context(config))
 
 
 @router.post(
@@ -83,12 +93,9 @@ async def save_settings(
         save_status, save_success = "Settings saved", True
     except IntegrationConfigError as exc:
         save_status, save_success = str(exc), False
-    return templates.TemplateResponse(
+    return _no_store_settings_response(
         request,
-        "_settings.html",
-        context=_settings_context(
-            config, save_status=save_status, save_success=save_success
-        ),
+        **_settings_context(config, save_status=save_status, save_success=save_success),
     )
 
 
@@ -113,12 +120,9 @@ async def clear_setting(
         save_status, save_success = f"{key} cleared", True
     except IntegrationConfigError as exc:
         save_status, save_success = str(exc), False
-    return templates.TemplateResponse(
+    return _no_store_settings_response(
         request,
-        "_settings.html",
-        context=_settings_context(
-            config, save_status=save_status, save_success=save_success
-        ),
+        **_settings_context(config, save_status=save_status, save_success=save_success),
     )
 
 
@@ -130,10 +134,6 @@ async def clear_setting(
 async def rotate_token(request: Request, config: ConfigDep) -> HTMLResponse:
     """Generate and persist a new ``APP_AUTH_TOKEN``, revealed once."""
     token = config.rotate_token()
-    response = templates.TemplateResponse(
-        request,
-        "_settings.html",
-        context=_settings_context(config, revealed_token=token),
+    return _no_store_settings_response(
+        request, **_settings_context(config, revealed_token=token)
     )
-    response.headers["Cache-Control"] = "no-store"
-    return response
