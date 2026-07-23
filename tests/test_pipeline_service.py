@@ -30,6 +30,7 @@ def test_run_once_success(monkeypatch, tmp_path) -> None:
 
 def test_run_once_failure_uses_stderr(monkeypatch, tmp_path) -> None:
     _use_status_repo(monkeypatch, tmp_path)
+
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="boom")
 
@@ -40,7 +41,9 @@ def test_run_once_failure_uses_stderr(monkeypatch, tmp_path) -> None:
     assert PipelineService.status()["state"] == "failed"
 
 
-def test_nonzero_exit_overrides_premature_complete_status(monkeypatch, tmp_path) -> None:
+def test_nonzero_exit_overrides_premature_complete_status(
+    monkeypatch, tmp_path
+) -> None:
     repo = _use_status_repo(monkeypatch, tmp_path)
 
     def fake_run(*args, **kwargs):
@@ -52,7 +55,9 @@ def test_nonzero_exit_overrides_premature_complete_status(monkeypatch, tmp_path)
             PipelineStage.EXPORT, StageState.COMPLETE, expected_run_id=run_id
         )
         repo.finish(PipelineState.COMPLETE, expected_run_id=run_id)
-        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="log failed")
+        return subprocess.CompletedProcess(
+            args, returncode=1, stdout="", stderr="log failed"
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = PipelineService().run_once()
@@ -63,6 +68,7 @@ def test_nonzero_exit_overrides_premature_complete_status(monkeypatch, tmp_path)
 
 def test_run_once_timeout_returns_failure(monkeypatch, tmp_path) -> None:
     repo = _use_status_repo(monkeypatch, tmp_path)
+
     def fake_run(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 0))
 
@@ -93,7 +99,9 @@ def test_status_reads_persisted_cross_process_progress(monkeypatch, tmp_path) ->
     assert status["analysis_total"] == 20
 
 
-def test_unexpected_subprocess_exception_sets_terminal_failure(monkeypatch, tmp_path) -> None:
+def test_unexpected_subprocess_exception_sets_terminal_failure(
+    monkeypatch, tmp_path
+) -> None:
     repo = _use_status_repo(monkeypatch, tmp_path)
 
     def fake_run(*args, **kwargs):
@@ -117,7 +125,9 @@ def test_older_service_completion_does_not_terminate_newer_run(
         repo.finish(PipelineState.COMPLETE, expected_run_id=old_run_id)
         repo.start(run_id="run-b")
         repo.finish(PipelineState.COMPLETE, expected_run_id="run-b")
-        return subprocess.CompletedProcess(args, returncode=0, stdout="old ok", stderr="")
+        return subprocess.CompletedProcess(
+            args, returncode=0, stdout="old ok", stderr=""
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = PipelineService().run_once()
@@ -160,22 +170,3 @@ def test_run_once_rejects_concurrent_refresh() -> None:
 
     assert result.success is False
     assert "already running" in result.details.lower()
-
-
-def test_missing_configuration_reports_capability_impacts(monkeypatch) -> None:
-    for key in (
-        "FMP_API_KEY",
-        "ALPHA_VANTAGE_API_KEY",
-        "EMAIL_USER",
-        "EMAIL_PASSWORD",
-        "EMAIL_TO",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-    warnings = PipelineService.missing_configuration()
-
-    assert [warning["name"] for warning in warnings] == [
-        "FMP API key",
-        "Alpha Vantage API key",
-        "Email alert settings",
-    ]

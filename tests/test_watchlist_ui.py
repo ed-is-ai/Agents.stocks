@@ -16,6 +16,7 @@ from starlette.requests import Request
 from app.api.app import app
 from app.api.dependencies import (
     get_alerts_repository,
+    get_integration_config_service,
     get_pipeline_service,
     get_portfolio_service,
     get_trader_service,
@@ -29,7 +30,23 @@ from app.schemas.pipeline_status import PipelineState
 from app.schemas.record import StockRecord
 from app.schemas.scan import CANSLIMScore, MomentumScore, StockAnalysis
 from app.schemas.source_health import SourceHealth, SourceName, SourceState
+from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineRunResult
+
+
+def _fully_configured_service(tmp_path: Path) -> IntegrationConfigService:
+    """Return a config service with every capability configured (no warnings)."""
+    service = IntegrationConfigService(tmp_path / ".env")
+    service.update(
+        {
+            "FMP_API_KEY": "test-fmp",
+            "ALPHA_VANTAGE_API_KEY": "test-av",
+            "EMAIL_USER": "test@example.com",
+            "EMAIL_PASSWORD": "test-pass",
+            "EMAIL_TO": "test@example.com",
+        }
+    )
+    return service
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -278,18 +295,20 @@ def test_removed_scanner_partial_returns_not_found() -> None:
 
 
 @pytest.mark.asyncio
-async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() -> None:
+async def test_initial_and_completed_refresh_use_equivalent_watchlist_context(
+    tmp_path,
+) -> None:
     records = []
     trader = MagicMock()
     trader.get_portfolio.return_value = [SimpleNamespace(ticker="AAPL")]
     portfolio = MagicMock()
     portfolio.load_analysis.return_value = records
     pipeline = MagicMock()
-    pipeline.missing_configuration.return_value = []
     pipeline.run_once.return_value = PipelineRunResult(success=True, details="done")
     alerts = MagicMock()
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
+    config = _fully_configured_service(tmp_path)
 
     initial = await partial_watchlist(
         _request("/partials/watchlist"), trader, portfolio, alerts
@@ -300,6 +319,7 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
         portfolio,
         pipeline,
         alerts,
+        config,
         confirm_missing=False,
     )
 
@@ -327,22 +347,23 @@ def test_watchlist_frontend_assets_are_served() -> None:
 
 
 def test_watchlist_and_refresh_http_paths_render_canonical_partial(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     trader = MagicMock()
     trader.get_portfolio.return_value = []
     portfolio = MagicMock()
     portfolio.load_analysis.return_value = []
     pipeline = MagicMock()
-    pipeline.missing_configuration.return_value = []
     pipeline.run_once.return_value = PipelineRunResult(success=True, details="done")
     alerts = MagicMock()
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
+    config = _fully_configured_service(tmp_path)
     app.dependency_overrides[get_trader_service] = lambda: trader
     app.dependency_overrides[get_portfolio_service] = lambda: portfolio
     app.dependency_overrides[get_pipeline_service] = lambda: pipeline
     app.dependency_overrides[get_alerts_repository] = lambda: alerts
+    app.dependency_overrides[get_integration_config_service] = lambda: config
     monkeypatch.setenv("APP_AUTH_TOKEN", "test-token")
 
     try:

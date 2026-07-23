@@ -108,37 +108,6 @@ class PipelineService:
         return outcome
 
     @staticmethod
-    def missing_configuration() -> list[dict[str, str]]:
-        """Return non-blocking pipeline capability warnings without secrets."""
-        import os
-
-        warnings: list[dict[str, str]] = []
-        if not os.getenv("FMP_API_KEY"):
-            warnings.append(
-                {
-                    "name": "FMP API key",
-                    "impact": "The S&P 500 VCP screener will be skipped.",
-                }
-            )
-        if not os.getenv("ALPHA_VANTAGE_API_KEY"):
-            warnings.append(
-                {
-                    "name": "Alpha Vantage API key",
-                    "impact": "Missing Yahoo fundamental fields will not be backfilled.",
-                }
-            )
-        if not all(
-            os.getenv(key) for key in ("EMAIL_USER", "EMAIL_PASSWORD", "EMAIL_TO")
-        ):
-            warnings.append(
-                {
-                    "name": "Email alert settings",
-                    "impact": "Summary emails and alert delivery are disabled.",
-                }
-            )
-        return warnings
-
-    @staticmethod
     def _set_finished(outcome: PipelineRunResult, run_id: str) -> None:
         current = _status_repository.load()
         if current.run_id != run_id:

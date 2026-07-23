@@ -1,22 +1,66 @@
-<div class="pipeline-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="pipeline-confirm-title">
-  <div class="pipeline-confirmation-card">
-    <h2 id="pipeline-confirm-title"><i class="bi bi-exclamation-triangle-fill"></i> Pipeline warnings</h2>
-    <p>This refresh will have reduced coverage because:</p>
-    <ul>
-      {% for warning in warnings %}
-      <li><strong>{{ warning.name }}</strong><br><span>{{ warning.impact }}</span></li>
-      {% endfor %}
-    </ul>
-    <p class="small">Add the missing configuration to <code>.env</code> for full coverage, or continue with this partial refresh.</p>
-    <div class="pipeline-confirmation-actions">
-      <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('pipeline-confirmation').innerHTML=''">Cancel</button>
-      <button class="btn btn-sm btn-primary"
-              hx-post="/refresh-data"
-              hx-vals='{"confirm_missing": true}'
-              hx-target="#tab-content" hx-swap="innerHTML"
-              hx-on::before-request="document.getElementById('pipeline-confirmation').innerHTML=''">
-        Continue with partial refresh
-      </button>
+<div class="modal fade" id="pipelineConfirmationModal" tabindex="-1"
+     aria-labelledby="pipelineConfirmationTitle" aria-modal="true" role="dialog">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title" id="pipelineConfirmationTitle">
+          <i class="bi bi-exclamation-triangle-fill"></i> Pipeline warnings
+        </h2>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cancel"></button>
+      </div>
+      <div class="modal-body">
+        <p>This refresh will have reduced coverage because:</p>
+        <ul class="pipeline-warning-list">
+          {% for warning in warnings %}
+          <li class="pipeline-warning pipeline-warning-{{ warning.severity }}">
+            <span class="pipeline-warning-category">{{ warning.category.label }}</span>
+            <strong>{{ warning.title }}</strong>
+            <br><span>{{ warning.impact }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        <p class="small text-muted mb-0">Continuing can still produce usable but partial results.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="pipelineConfirmationCancel" data-bs-dismiss="modal">
+          Cancel
+        </button>
+        <button type="button" class="btn btn-sm btn-outline-primary"
+                hx-get="/partials/settings" hx-target="#tab-content" hx-swap="innerHTML"
+                hx-on::after-request="
+                  bootstrap.Modal.getInstance(document.getElementById('pipelineConfirmationModal'))?.hide();
+                  document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
+                  document.getElementById('tab-settings').classList.add('active');
+                ">
+          Configure integrations
+        </button>
+        <button class="btn btn-sm btn-primary"
+                hx-post="/refresh-data"
+                hx-vals='{"confirm_missing": true, "confirmed_fingerprint": "{{ fingerprint }}"}'
+                hx-target="#tab-content" hx-swap="innerHTML"
+                hx-on::before-request="bootstrap.Modal.getInstance(document.getElementById('pipelineConfirmationModal'))?.hide();">
+          Continue with partial refresh
+        </button>
+      </div>
     </div>
   </div>
 </div>
+<script>
+  (function () {
+    var el = document.getElementById('pipelineConfirmationModal');
+    if (!el || !window.bootstrap) return;
+    // A confirmation re-rendered after a stale/rejected fingerprint replaces
+    // this markup without going through .hide() — clear any leftover
+    // backdrop/body state from the previous instance before showing a new one.
+    document.querySelectorAll('.modal-backdrop').forEach(function (backdrop) { backdrop.remove(); });
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('padding-right');
+    var modal = new bootstrap.Modal(el);
+    el.addEventListener('shown.bs.modal', function () {
+      var cancelBtn = document.getElementById('pipelineConfirmationCancel');
+      if (cancelBtn) cancelBtn.focus();
+    });
+    el.addEventListener('hidden.bs.modal', function () { el.remove(); });
+    modal.show();
+  })();
+</script>
