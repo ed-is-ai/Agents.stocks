@@ -1,7 +1,8 @@
-"""Alert-agent → notification-centre emit tests (#80).
+"""Alert-agent → notification-centre emit tests (#80/#81).
 
-Notifications are recorded only when an email is actually dispatched, so a
-suppressed/unconfigured send leaves the feed empty.
+Watched-setup signals are folded into the digest and their notifications are
+recorded only when the digest is actually dispatched, so a suppressed or
+unconfigured send leaves the feed empty.
 """
 
 from unittest.mock import MagicMock, patch
@@ -35,7 +36,9 @@ def _stock(ticker: str, price: float) -> StockRecord:
 
 
 @patch("smtplib.SMTP")
-def test_entry_trigger_records_notification_when_sent(mock_smtp, tmp_path) -> None:
+def test_entry_trigger_records_notification_when_digest_sent(
+    mock_smtp, tmp_path
+) -> None:
     mock_smtp.return_value.__enter__.return_value = MagicMock()
     agent = AlertAgent(db_path=str(tmp_path / "alerts.db"), email_config=_EMAIL)
     agent._alerts.ensure_schema()
@@ -43,7 +46,12 @@ def test_entry_trigger_records_notification_when_sent(mock_smtp, tmp_path) -> No
         "NVDA", 8, "Stage 2", "setup", entry_price=100.0, stop_loss=90.0
     )
 
+    # check_positions only queues; the notification is recorded when the digest
+    # (send_summary_email) is actually dispatched.
     agent.check_positions([_stock("NVDA", 105.0)])
+    assert build_notifications_repository().recent() == []
+
+    agent.send_summary_email()
 
     items = build_notifications_repository().recent()
     assert len(items) == 1
@@ -52,7 +60,7 @@ def test_entry_trigger_records_notification_when_sent(mock_smtp, tmp_path) -> No
 
 
 def test_entry_trigger_records_nothing_when_email_unconfigured(tmp_path) -> None:
-    # Empty SMTP credentials -> send_email returns False, nothing recorded.
+    # Empty SMTP credentials -> digest send returns False, nothing recorded.
     agent = AlertAgent(
         db_path=str(tmp_path / "alerts.db"),
         email_config=EmailConfig(
@@ -65,5 +73,6 @@ def test_entry_trigger_records_nothing_when_email_unconfigured(tmp_path) -> None
     )
 
     agent.check_positions([_stock("NVDA", 105.0)])
+    agent.send_summary_email()
 
     assert build_notifications_repository().recent() == []
