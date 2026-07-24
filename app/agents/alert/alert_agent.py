@@ -18,9 +18,14 @@ from app.core.alerting import classify_alert, is_on_cooldown
 from app.core.alerting import BREAKOUT_COOLDOWN_HOURS as ALERT_COOLDOWN_HOURS
 from app.core.config import ALERTS_DB, ANALYSIS_JSON
 from app.schemas import AlertSummary, EmailConfig, Position, StockRecord
+from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.db import Connect
+from app.repositories.notifications_repo import (
+    NotificationsRepository,
+    build_notifications_repository,
+)
 
 
 DB_PATH = str(ALERTS_DB)
@@ -56,10 +61,38 @@ class AlertAgent(Agent):
         default_factory=list
     )
     _alerts: AlertsRepository = PrivateAttr()
+    _notifications: NotificationsRepository = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
         self._alerts = AlertsRepository(connect)
+        self._notifications = build_notifications_repository()
+
+    def _notify(
+        self,
+        event_type: str,
+        title: str,
+        *,
+        severity: NotificationSeverity = NotificationSeverity.INFO,
+        body: str = "",
+        ticker: str | None = None,
+    ) -> None:
+        """Record an alert notification, never letting it break email flow.
+
+        Only called after an email is actually dispatched, so the notification
+        centre (#80) mirrors "alerts sent" exactly.
+        """
+        try:
+            self._notifications.record(
+                NotificationCategory.ALERT,
+                event_type,
+                title,
+                severity=severity,
+                body=body,
+                ticker=ticker,
+            )
+        except Exception as error:  # pragma: no cover - defensive
+            print(f"  [notify] error: {error}")
 
     def check_positions(self, stocks: list[StockRecord]) -> None:
         """Fire follow-up alerts when a watching position crosses entry or stop loss."""
@@ -77,7 +110,13 @@ class AlertAgent(Agent):
                     f"(entry was ${entry_price:.2f})"
                 )
                 print(f"\n{msg}")
-                self.send_email(f"Entry Triggered: {ticker}", f"<p>{msg}</p>", msg)
+                if self.send_email(f"Entry Triggered: {ticker}", f"<p>{msg}</p>", msg):
+                    self._notify(
+                        "entry_triggered",
+                        f"Entry triggered — {ticker}",
+                        body=msg,
+                        ticker=ticker,
+                    )
                 self._alerts.set_status(rowid, "entered")
             elif stop_loss is not None and current <= stop_loss:
                 msg = (
@@ -85,7 +124,14 @@ class AlertAgent(Agent):
                     f"(stop was ${stop_loss:.2f})"
                 )
                 print(f"\n{msg}")
-                self.send_email(f"Stop Loss Hit: {ticker}", f"<p>{msg}</p>", msg)
+                if self.send_email(f"Stop Loss Hit: {ticker}", f"<p>{msg}</p>", msg):
+                    self._notify(
+                        "stop_loss_hit",
+                        f"Stop loss hit — {ticker}",
+                        severity=NotificationSeverity.WARNING,
+                        body=msg,
+                        ticker=ticker,
+                    )
                 self._alerts.set_status(rowid, "stopped")
 
     def run(self, payload: Iterable[StockRecord]) -> AlertSummary:
@@ -1003,7 +1049,25 @@ class AlertAgent(Agent):
         )
         html_body = "\n".join(html_parts)
 
-        self.send_email(subject, html_body, text_body)
+        if not self.send_email(subject, html_body, text_body):
+            return
+        # Digest actually went out: mirror each alert it carried into the
+        # notification centre (#80), deep-linkable per ticker.
+        for pos, _stock in self._sell_alerts:
+            self._notify(
+                "stop_loss_hit",
+                f"Stop loss — {pos.ticker}",
+                severity=NotificationSeverity.WARNING,
+                body=f"{pos.ticker} breached its stop and was flagged to sell.",
+                ticker=pos.ticker,
+            )
+        for stock, trigger in strong_buys:
+            self._notify(
+                "breakout",
+                f"{trigger} — {stock.ticker}",
+                body=f"{stock.ticker} qualified as a buy ({trigger}).",
+                ticker=stock.ticker,
+            )
 
     @staticmethod
     def _yahoo_url(ticker: str) -> str:
@@ -1130,14 +1194,19 @@ class AlertAgent(Agent):
           {self._svg_chart(stock.price_history, score_color)}
         </div>"""
 
-    def send_email(self, subject: str, html_body: str, text_body: str) -> None:
+    def send_email(self, subject: str, html_body: str, text_body: str) -> bool:
+        """Send one email; return True only if it was actually dispatched.
+
+        Returns False when SMTP is unconfigured or the send raises, so callers
+        can record "alerts sent" notifications (#80) that mirror reality.
+        """
         if (
             not self.email_config.user
             or not self.email_config.password
             or not self.email_config.recipient
         ):
             print("  [email] (not configured)")
-            return
+            return False
 
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -1156,8 +1225,10 @@ class AlertAgent(Agent):
                     msg.as_string(),
                 )
             print(f"  [email] sent to {self.email_config.recipient}")
+            return True
         except Exception as error:
             print(f"  [email] error: {error}")
+            return False
 
 
 if __name__ == "__main__":
