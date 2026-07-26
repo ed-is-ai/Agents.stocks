@@ -16,13 +16,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 # Each agent's data lives alongside its code under app/agents/<name>/.
 TRADES_DB = ROOT_DIR / "app" / "agents" / "trader" / "trades.db"
 ALERTS_DB = ROOT_DIR / "app" / "agents" / "alert" / "alerts.db"
-# In-app notification centre store (#80). Co-located with the alert agent,
-# which is the primary writer, though the orchestrator writes refresh/source
-# events too.
 NOTIFICATIONS_DB = ROOT_DIR / "app" / "agents" / "alert" / "notifications.db"
-# High-water-mark per held position for trailing-stop detection (#82). A
-# dedicated store keeps run-to-run peak state decoupled from the trade replay
-# (positions are rebuilt every run and hold no persistent state).
 POSITION_STATE_DB = ROOT_DIR / "app" / "agents" / "alert" / "position_state.db"
 RESULTS_DB = ROOT_DIR / "app" / "agents" / "analyst" / "results.db"
 CONGRESS_CACHE_DB = ROOT_DIR / "app" / "agents" / "scanner" / "congress_cache.db"
