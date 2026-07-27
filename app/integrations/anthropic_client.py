@@ -47,13 +47,20 @@ _SYSTEM_PROMPT = (
     "in the FOMC meeting cycle; and (7) a handful of recent news headlines "
     "with their source domain and URL.\n\n"
     "Write one headline and a few bullets that: describe the sector "
-    "allocation and its week-on-week shift, leading with sectors most "
-    "prevalent among high-conviction (7/10+) names; read the market's likely "
-    "cycle position and risk posture from the mix — e.g. whether leadership "
-    "looks defensive / late-cycle (utilities, staples, healthcare, REITs) or "
-    "risk-on / early-to-mid-cycle (technology, discretionary, industrials) — "
-    "framed against breadth and the FOMC position, hedged as 'likely' or "
-    "'consistent with', never as certainty; note whether market breadth is "
+    "allocation and its week-on-week shift, leading with the sectors that "
+    "have the highest high-conviction (7/10+) share — the list is already "
+    "ordered that way, so do not re-rank by raw candidate count (a sector can "
+    "top the candidate count while showing thin conviction, which is not "
+    "leadership); read the market's likely cycle position and risk posture "
+    "from the mix — e.g. whether leadership looks defensive / late-cycle "
+    "(utilities, staples, healthcare, REITs) or risk-on / early-to-mid-cycle "
+    "(technology, discretionary, industrials) — but weight where the "
+    "high-conviction names and multi-year breakouts actually concentrate over "
+    "raw candidate counts, and where those signals conflict (e.g. cyclical "
+    "candidate counts but defensive / rate-sensitive conviction and "
+    "breakouts) say so plainly rather than forcing a single risk-on or "
+    "defensive label; keep it hedged as 'likely' or 'consistent with', never "
+    "as certainty; note whether market breadth is "
     "broad or narrow / diverging and what that implies alongside the tilt; "
     "call out which sectors are seeing the most multi-year breakouts; flag "
     "the stocks lawmakers are most heavily buying, if any; and weave in "
@@ -112,14 +119,13 @@ def _build_user_prompt(
 
     lines.append(f"As of: {scan_snapshot.as_of}")
     lines.append(
-        "Sector prevalence this run "
-        "(share of candidates | high-conviction 7/10+ share of universe | "
-        "multi-year breakouts):"
+        "Sectors ranked by high-conviction (7/10+) share of the universe "
+        "(7/10+ share | share of all candidates | multi-year breakouts):"
     )
     for share in scan_snapshot.shares[:_TOP_N]:
         lines.append(
-            f"- {share.sector}: {_pct(share.count_share)} | "
-            f"{_pct(share.strong_share)} 7/10+ | {share.myb_count} MYB"
+            f"- {share.sector}: {_pct(share.strong_share)} 7/10+ | "
+            f"{_pct(share.count_share)} of candidates | {share.myb_count} MYB"
         )
 
     if scan_snapshot.deltas:

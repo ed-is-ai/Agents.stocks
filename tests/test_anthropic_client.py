@@ -203,6 +203,7 @@ class TestGenerateMarketNarrative:
 
         assert messages.last_kwargs is not None
         prompt = messages.last_kwargs["messages"][0]["content"]
+        assert "ranked by high-conviction" in prompt.lower()
         assert "S&P 500 market breadth: 42%" in prompt
         assert "most heavily net-bought by congress/senate" in prompt.lower()
         assert "AAA | Energy | +8" in prompt

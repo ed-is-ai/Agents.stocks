@@ -54,15 +54,18 @@ def _pct(share: float) -> str:
 
 
 def _prevalence_bullet(snapshot: SectorAllocationSnapshot) -> str | None:
-    """Return the "most-prevalent sectors" bullet, or None if no candidates."""
+    """Return the "highest-conviction sectors" bullet, or None if no candidates."""
     top_shares = snapshot.shares[:_TOP_N]
     if not top_shares:
         return None
     leaders = ", ".join(
-        f"{s.sector} ({_pct(s.count_share)}, {_pct(s.strong_share)} at 7/10+)"
+        f"{s.sector} ({_pct(s.strong_share)} at 7/10+, {_pct(s.count_share)} "
+        "of candidates)"
         for s in top_shares
     )
-    return f"Most-prevalent scan sectors this run: {leaders}."
+    return (
+        f"Highest-conviction scan sectors (share of universe scoring 7/10+): {leaders}."
+    )
 
 
 def _delta_bullets(snapshot: SectorAllocationSnapshot) -> list[str]:

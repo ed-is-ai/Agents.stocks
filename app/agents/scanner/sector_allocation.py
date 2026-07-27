@@ -71,8 +71,12 @@ def compute_sector_prevalence(
             strong_share=(strong.get(sector, 0) / total) if total else 0.0,
             myb_count=mybs.get(sector, 0),
         )
-        for sector, count in sorted(counts.items(), key=lambda kv: -kv[1])
+        for sector, count in counts.items()
     ]
+    # Rank by high-conviction (>= 7/10) prevalence first, then raw count: a
+    # sector can top the candidate count while showing thin conviction, so
+    # leading with conviction avoids over-reading screen breadth as leadership.
+    shares.sort(key=lambda s: (-s.strong_count, -s.count))
     return SectorAllocationSnapshot(as_of=today, total_candidates=total, shares=shares)
 
 

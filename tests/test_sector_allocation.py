@@ -272,6 +272,21 @@ class TestStrongAndMybCounts:
         assert by_sector["Healthcare"].strong_count == 1
         assert by_sector["Healthcare"].strong_share == 0.25
 
+    def test_shares_ranked_by_high_conviction_not_count(self) -> None:
+        records = [
+            _record("T1", "Technology", score=5),
+            _record("T2", "Technology", score=5),
+            _record("T3", "Technology", score=8),  # Tech: 3 candidates, 1 at 7/10+
+            _record("F1", "Financials", score=8),
+            _record(
+                "F2", "Financials", score=9
+            ),  # Financials: 2 candidates, 2 at 7/10+
+        ]
+        shares = sa.compute_sector_prevalence(records).shares
+        # Financials leads on conviction (2 >= 7/10) despite fewer candidates.
+        assert shares[0].sector == "Financials"
+        assert shares[0].count < shares[1].count
+
     def test_myb_count_tallies_multiyear_breakouts(self) -> None:
         a = _record("A", "Energy", score=8)
         a.analysis = StockAnalysis(
