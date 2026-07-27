@@ -93,6 +93,10 @@ PERIOD_DAYS = 252  # ~1 trading year for stage analysis
 
 _SKILLS_DIR = SKILLS_DIR
 _VCP_SCRIPT = _SKILLS_DIR / "vcp-screener" / "scripts" / "screen_vcp.py"
+# Cap on how many pre-filtered stocks undergo full VCP detection. ``--top`` is
+# set to the same value so the screener returns every scored candidate (no
+# arbitrary truncation), and the source count reflects the true total. #101
+_VCP_MAX_CANDIDATES = "250"
 
 
 class VcpScreenerError(RuntimeError):
@@ -148,9 +152,12 @@ def fetch_vcp_screener_tickers() -> list[str]:
                     "--output-dir",
                     tmpdir,
                     "--max-candidates",
-                    "250",
+                    _VCP_MAX_CANDIDATES,
+                    # Report every scored candidate rather than an arbitrary
+                    # top-N, so the source count reflects how many stocks
+                    # genuinely passed VCP detection (was pinned at 100). #101
                     "--top",
-                    "100",
+                    _VCP_MAX_CANDIDATES,
                 ],
                 capture_output=True,
                 text=True,
