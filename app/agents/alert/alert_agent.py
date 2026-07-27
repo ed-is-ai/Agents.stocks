@@ -1103,6 +1103,12 @@ class AlertAgent(Agent):
             narrative_lines = [f"\n\nMARKET NARRATIVE\n{market_narrative.headline}"]
             narrative_lines.extend(f"  - {b}" for b in market_narrative.bullets)
             narrative_lines.append(f"  ({market_narrative.not_advice})")
+            if market_narrative.sources:
+                sources_str = ", ".join(
+                    f"{s.label} ({s.url})" if s.url else s.label
+                    for s in market_narrative.sources
+                )
+                narrative_lines.append(f"  Sources: {sources_str}")
             text_parts.append("\n".join(narrative_lines))
 
         # ── Portfolio snapshot (text) ───────────────────────────────────────
@@ -1233,6 +1239,18 @@ class AlertAgent(Agent):
         narrative_html = ""
         if market_narrative:
             bullets_html = "".join(f"<li>{b}</li>" for b in market_narrative.bullets)
+            sources_html = ""
+            if market_narrative.sources:
+                links_html = ", ".join(
+                    f'<a href="{s.url}" style="color:#4338ca">{s.label}</a>'
+                    if s.url
+                    else s.label
+                    for s in market_narrative.sources
+                )
+                sources_html = (
+                    '<div style="font-size:0.7em;color:#94a3b8;margin-top:4px">'
+                    f"Sources: {links_html}</div>"
+                )
             narrative_html = f"""
             <div style="margin:16px 0;padding:14px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px">
               <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;color:#4338ca;margin-bottom:6px">
@@ -1241,6 +1259,7 @@ class AlertAgent(Agent):
               <div style="font-weight:700;margin-bottom:6px">{market_narrative.headline}</div>
               <ul style="margin:0 0 6px 18px;padding:0;font-size:0.88em">{bullets_html}</ul>
               <div style="font-size:0.72em;color:#64748b;font-style:italic">{market_narrative.not_advice}</div>
+              {sources_html}
             </div>"""
 
         # ── HTML body ──────────────────────────────────────────────────────

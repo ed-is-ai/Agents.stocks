@@ -15,6 +15,14 @@
     {% endfor %}
   </ul>
   <div class="small fst-italic text-muted">{{ market_narrative.not_advice }}</div>
+  {% if market_narrative.sources %}
+  <div class="small mt-1" style="color:#94a3b8">
+    Sources:
+    {% for source in market_narrative.sources %}
+    {% if source.url %}<a href="{{ source.url }}" style="color:#4338ca">{{ source.label }}</a>{% else %}{{ source.label }}{% endif %}{% if not loop.last %}, {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
 {% endif %}
 {% if refresh_status is defined %}

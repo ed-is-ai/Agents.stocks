@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from app.agents.alert.alert_agent import AlertAgent
 from app.schemas import EmailConfig, MarketNarrative
+from app.schemas.market_narrative import MarketNarrativeSource
 
 _EMAIL = EmailConfig(
     host="localhost",
@@ -48,6 +49,35 @@ def test_narrative_rendered_in_text_and_html(tmp_path) -> None:
     assert "Market Narrative" in captured["html"]
     assert "Technology leads scan candidates" in captured["html"]
     assert "Informational only, not financial advice." in captured["html"]
+
+
+def test_narrative_sources_footnote_rendered_in_text_and_html(tmp_path) -> None:
+    """Phase 3's Claude narrative populates `sources` — the digest must render it."""
+    agent = _agent(tmp_path)
+    narrative = MarketNarrative(
+        headline="Technology leads scan candidates",
+        bullets=["Reuters reports a rate pause."],
+        sources=[
+            MarketNarrativeSource(
+                label="reuters.com", url="https://reuters.com/article"
+            )
+        ],
+        not_advice="Informational only, not financial advice.",
+    )
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(market_narrative=narrative)
+
+    assert "reuters.com" in captured["text"]
+    assert "https://reuters.com/article" in captured["text"]
+    assert "reuters.com" in captured["html"]
+    assert "https://reuters.com/article" in captured["html"]
 
 
 def test_digest_omits_narrative_section_when_absent(tmp_path) -> None:

@@ -1,11 +1,14 @@
-"""Deterministic market-narrative blurb — the Phase 1 evergreen fallback.
+"""Market-narrative blurb: Claude summariser (#109 Phase 3) with a
+deterministic evergreen fallback (#109 Phase 1).
 
-Builds a plain-English ``MarketNarrative`` from sector-allocation deltas,
-portfolio sector weights, and the static FOMC market-cycle context — no LLM
-and no network involved. A later phase can build the *same* ``MarketNarrative``
-shape from a Claude-generated summary using these same structured inputs;
-callers (``AlertAgent.send_summary_email``, the watchlist banner) only ever
-render a ``MarketNarrative`` and don't need to change when the source does.
+``build_deterministic_narrative`` builds a plain-English ``MarketNarrative``
+from sector-allocation deltas, portfolio sector weights, and the static FOMC
+market-cycle context — no LLM and no network involved. ``build_llm_narrative``
+builds the *same* ``MarketNarrative`` shape from a Claude Sonnet 5 summary of
+those same structured inputs plus headline-level news context, run through
+the hallucination guard (``app.agents.scanner.narrative_guard``). Callers
+(``AlertAgent.send_summary_email``, the watchlist banner) only ever render a
+``MarketNarrative`` and don't need to change based on which builder produced it.
 """
 
 from __future__ import annotations
@@ -18,9 +21,12 @@ from app.agents.scanner.market_cycle import (
     PHASE_POST_FOMC,
     PHASE_PRE_FOMC_BLACKOUT,
 )
+from app.agents.scanner.narrative_guard import validate_against_context
 from app.core.config import MARKET_NARRATIVE_JSON
+from app.integrations.anthropic_client import AnthropicNarrativeClient
 from app.schemas.market_cycle import MarketCycleContext
-from app.schemas.market_narrative import MarketNarrative
+from app.schemas.market_narrative import MarketNarrative, MarketNarrativeSource
+from app.schemas.news_context import NewsContext
 from app.schemas.sector_allocation import (
     PortfolioSectorWeight,
     SectorAllocationSnapshot,
@@ -133,6 +139,67 @@ def build_deterministic_narrative(
         headline=headline,
         bullets=bullets,
         sources=[],
+        not_advice=NOT_ADVICE_NOTE,
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+
+
+def _sources_from_domains(
+    cited_domains: list[str], news_context: NewsContext
+) -> list[MarketNarrativeSource]:
+    """Build the digest footnote list from the news items actually cited.
+
+    One source per cited domain (first matching item wins), in the order
+    Claude cited them — not every fed item, only the ones the guard
+    confirmed were actually drawn on.
+    """
+    by_domain: dict[str, MarketNarrativeSource] = {}
+    for item in news_context.items:
+        domain = item.domain.strip().lower()
+        domain = domain[4:] if domain.startswith("www.") else domain
+        by_domain.setdefault(
+            domain, MarketNarrativeSource(label=item.domain, url=item.url)
+        )
+    return [by_domain[d] for d in cited_domains if d in by_domain]
+
+
+def build_llm_narrative(
+    scan_snapshot: SectorAllocationSnapshot,
+    portfolio_weights: list[PortfolioSectorWeight],
+    cycle: MarketCycleContext,
+    news_context: NewsContext,
+    anthropic_client: AnthropicNarrativeClient,
+) -> MarketNarrative | None:
+    """Attempt a Claude-generated ``MarketNarrative``; ``None`` on any degraded path.
+
+    Returns ``None`` — signalling the caller to fall back to
+    ``build_deterministic_narrative`` — when: the client has no API key
+    configured, the news context came back degraded or empty (nothing to
+    ground a summary in), the API call itself fails or is refused, or the
+    hallucination guard rejects the draft outright (bad headline) or leaves
+    no bullets standing. This must never raise: every failure mode here is
+    absorbed into a ``None`` return, mirroring
+    ``AnalystAgent.get_llm_client()``'s graceful-skip pattern.
+    """
+    if not anthropic_client.enabled:
+        return None
+    if news_context.degraded or not news_context.items:
+        return None
+
+    draft = anthropic_client.generate_market_narrative(
+        scan_snapshot, portfolio_weights, cycle, news_context
+    )
+    if draft is None:
+        return None
+
+    result = validate_against_context(draft, news_context)
+    if not result.valid or not result.kept_bullets:
+        return None
+
+    return MarketNarrative(
+        headline=draft.headline,
+        bullets=result.kept_bullets,
+        sources=_sources_from_domains(result.cited_domains, news_context),
         not_advice=NOT_ADVICE_NOTE,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
