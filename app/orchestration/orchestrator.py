@@ -47,6 +47,19 @@ from app.agents.scanner.scan_history import (
     load_history,
     save_history,
 )
+from app.agents.scanner.market_cycle import get_market_cycle_context
+from app.agents.scanner.market_narrative import (
+    build_deterministic_narrative,
+    save_market_narrative,
+)
+from app.agents.scanner.sector_allocation import (
+    compute_portfolio_sector_weights,
+    compute_sector_prevalence,
+    latest_snapshot,
+    load_sector_history,
+    save_sector_snapshot,
+    with_deltas,
+)
 from app.schemas import StockRecord
 from app.core.config import (
     ANALYSIS_JSON,
@@ -951,7 +964,30 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             actionable=buy_alerts + sell_alerts,
             expected_run_id=run_id,
         )
-        alerter.send_summary_email(positions, gbp_totals=gbp_totals)
+
+        # Deterministic sector-allocation + market-cycle narrative (#109,
+        # Phase 1 — no API keys/network/LLM). Persisted below alongside
+        # save_history so the next run's delta has a baseline, and cached to
+        # disk so the web banner and this digest render the same snapshot
+        # without recomputing.
+        sector_history = load_sector_history()
+        sector_snapshot = with_deltas(
+            compute_sector_prevalence(analysis_results),
+            latest_snapshot(sector_history),
+        )
+        ticker_sector = {r.ticker: r.sector or "Unknown" for r in analysis_results}
+        portfolio_sector_weights = compute_portfolio_sector_weights(
+            positions, ticker_sector, gbpusd
+        )
+        market_cycle = get_market_cycle_context()
+        market_narrative = build_deterministic_narrative(
+            sector_snapshot, portfolio_sector_weights, market_cycle
+        )
+        save_market_narrative(market_narrative)
+
+        alerter.send_summary_email(
+            positions, gbp_totals=gbp_totals, market_narrative=market_narrative
+        )
 
         status_repo.transition(
             PipelineStage.ALERTS,
@@ -1023,6 +1059,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         new = get_new_tickers(current_tickers, history)
         breakouts = get_fresh_breakouts(analysis_results, history)
         save_history(analysis_results, history)
+        save_sector_snapshot(sector_snapshot, sector_history)
 
         for r in analysis_results:
             if r.analysis and r.ticker in breakouts:
