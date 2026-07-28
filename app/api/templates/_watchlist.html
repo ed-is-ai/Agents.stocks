@@ -25,23 +25,6 @@
   {% endif %}
 </div>
 {% endif %}
-{% if refresh_status is defined %}
-<div class="alert alert-{{ 'success' if refresh_success else 'danger' }} border-0 d-flex align-items-center gap-2 mt-1">
-  <i class="bi bi-{{ 'check-circle-fill' if refresh_success else 'exclamation-triangle-fill' }}"></i>
-  <div>
-    <strong>{{ refresh_status }}.</strong>
-    {% if refresh_success and refresh_stages %}
-      <div class="small text-muted mt-1">
-        {% for stage in refresh_stages %}
-          <span class="me-3"><i class="bi bi-check-circle-fill text-success me-1"></i>{{ stage }}</span>
-        {% endfor %}
-      </div>
-    {% elif refresh_details %}
-      <div class="small text-muted">{{ refresh_details }}</div>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
 <div class="tbl-toolbar wl-toolbar" id="wl-toolbar">
   <div class="wl-toolbar-info">
     <i class="bi bi-bar-chart-line me-1"></i>
@@ -103,6 +86,7 @@
         {% set sepa_count = 0 %}
       {% endif %}
       {% set is_uk = r.ticker.endswith('.L') %}
+      {% set sym = '£' if r.currency == 'GBP' else '$' %}
       {# ── Canonical numeric values (sorting/filtering read these, never text) ── #}
       {% set stage_num = a.stage.split(' ')[1] | int if a and a.stage and ' ' in a.stage else '' %}
       {% set canslim_val = a.canslim.total if a and a.canslim else '' %}
@@ -134,7 +118,7 @@
             <span class="badge-vcp" title="VCP breakout — entry zone just transitioned to broken_out this run">VCP</span>
           {% endif %}
           {% if a and a.multiyear_breakout %}
-            <span class="badge-myb" title="Multi-year base breakout — cleared ${{ '%.2f'|format(a.multiyear_pivot) }} pivot">MYB</span>
+            <span class="badge-myb" title="Multi-year base breakout — cleared {{ sym }}{{ '%.2f'|format(a.multiyear_pivot) }} pivot">MYB</span>
           {% endif %}
           {% if is_uk %}
             <span class="badge-uk" title="London Stock Exchange (LSE)">🇬🇧</span>
@@ -204,12 +188,12 @@
         <td class="wl-col wl-col-sector" data-col="sector" data-val="{{ r.sector or '' }}"><span class="text-muted" style="font-size:0.76rem">{{ r.sector or "" }}</span></td>
 
         <!-- Price -->
-        <td data-col="price" data-val="{{ dval(r.price) }}" class="wl-col wl-col-price fw-semibold">${{ "%.2f"|format(r.price) }}</td>
+        <td data-col="price" data-val="{{ dval(r.price) }}" class="wl-col wl-col-price fw-semibold">{{ sym }}{{ "%.2f"|format(r.price) }}</td>
 
         <!-- Entry price -->
         <td class="wl-col wl-col-entry" data-col="entry" data-val="{{ dval(a.entry_price) if a and a.entry_price else '' }}">
           {% if a and a.entry_price %}
-            <span class="text-muted">${{ "%.2f"|format(a.entry_price) }}</span>
+            <span class="text-muted">{{ sym }}{{ "%.2f"|format(a.entry_price) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
@@ -238,7 +222,7 @@
         <!-- Stop price -->
         <td class="wl-col wl-col-stop" data-col="stop" data-val="{{ dval(a.stop_loss) if a and a.stop_loss else '' }}">
           {% if a and a.stop_loss %}
-            <span class="text-muted">${{ "%.2f"|format(a.stop_loss) }}</span>
+            <span class="text-muted">{{ sym }}{{ "%.2f"|format(a.stop_loss) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
@@ -274,8 +258,8 @@
         <td class="wl-col wl-col-targets" data-col="targets" data-val="{{ dval(targets_val) }}">
           {% if a and a.r_multiples %}
             <span class="text-muted" style="font-size:0.74rem; line-height:1.5; white-space:nowrap">
-              1R ${{ "%.2f"|format(a.r_multiples["1.0R"]) }}<br>
-              2R ${{ "%.2f"|format(a.r_multiples["2.0R"]) }}<br>
+              1R {{ sym }}{{ "%.2f"|format(a.r_multiples["1.0R"]) }}<br>
+              2R {{ sym }}{{ "%.2f"|format(a.r_multiples["2.0R"]) }}<br>
               {% if a.reward_risk_ratio %}<span style="color:#94a3b8">R:R {{ "%.1f"|format(a.reward_risk_ratio) }}&times;</span>{% endif %}
             </span>
           {% else %}
