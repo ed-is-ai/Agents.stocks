@@ -25,5 +25,7 @@ raw = (FIXTURES / "stocktwits_weekly_sample.eml").read_text(encoding="utf-8")
 
 ## Fixtures
 
-- `stocktwits_weekly_sample.eml` — _(to add)_ sample weekly StockTwits "top 25"
-  email, used to test IMAP ingestion + ticker parsing (issue #137).
+- `stocktwits_weekly_sample.html` — sanitised weekly StockTwits "Top 25"
+  newsletter body (quoted-printable, recipient address redacted), used to test
+  image-URL extraction (issue #137). Note the Top 25 lists are embedded as
+  PNG images, so the tickers themselves are not present as text.
