@@ -5,8 +5,11 @@ The newsletter renders its three index lists (S&P 500, Nasdaq 100, Russell
 all. This module therefore:
 
 1. fetches the most recent matching email over IMAP,
-2. extracts the three ``momentum-<index>-<date>.png`` image URLs from the HTML,
-3. downloads each image and asks Claude (vision) for the Top 25 tickers.
+2. skips (no vision cost) unless its received time is newer than the stored
+   watermark — so an already-seen weekly issue is never re-processed,
+3. extracts the three ``momentum-<index>-<date>.png`` image URLs from the HTML,
+4. downloads each image and asks Claude (vision) for the Top 25 tickers,
+5. records the email's received time as the new watermark.
 
 Every step degrades to ``None``/``{}`` on any failure so ``ExtractionAgent``
 falls back to the quarterly-curated ``config/stocktwits_watchlist.json`` — the
@@ -31,12 +34,17 @@ import json
 import os
 import quopri
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.policy import default as _DEFAULT_POLICY
+from pathlib import Path
 from typing import Any
 
 import requests
+
+from app.core.config import STOCKTWITS_EMAIL_WATERMARK_JSON
 
 # Canonical index keys, matching config/stocktwits_watchlist.json and the shape
 # ExtractionAgent already consumes.
@@ -150,6 +158,18 @@ def extract_list_image_urls(html: str) -> dict[str, str]:
     return urls
 
 
+def _parse_internaldate(envelope: Any) -> datetime | None:
+    """Parse an IMAP fetch envelope's INTERNALDATE into an aware UTC datetime."""
+    try:
+        parsed = imaplib.Internaldate2tuple(envelope)
+        if parsed is None:
+            return None
+        # Internaldate2tuple returns local time; mktime -> epoch -> UTC.
+        return datetime.fromtimestamp(time.mktime(parsed), tz=timezone.utc)
+    except Exception:
+        return None
+
+
 def _detect_media_type(data: bytes) -> str:
     """Best-effort image media type from magic bytes (default JPEG)."""
     if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -175,9 +195,11 @@ class StockTwitsEmailSource:
         self,
         config: ImapConfig | None = None,
         api_key: str | None = None,
+        watermark_path: Path | None = None,
     ) -> None:
         self.config = config or ImapConfig.from_env()
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        self.watermark_path = watermark_path or STOCKTWITS_EMAIL_WATERMARK_JSON
 
     @property
     def enabled(self) -> bool:
@@ -185,12 +207,25 @@ class StockTwitsEmailSource:
         return bool(self.config.user and self.config.password and self.api_key)
 
     def load(self) -> dict[str, list[str]] | None:
-        """Return per-index Top 25 tickers from the latest email, or None."""
+        """Return per-index Top 25 tickers from a newer-than-watermark email.
+
+        Returns ``None`` when the source is unconfigured, no matching email is
+        found, or the newest email is not newer than the recorded watermark (so
+        an already-seen weekly issue is never re-processed). On success the
+        watermark is advanced to the email's received time.
+        """
         if not self.enabled:
             return None
-        html = self._fetch_latest_email_html()
-        if not html:
+        fetched = self._fetch_latest_email()
+        if fetched is None:
             return None
+        received_at, html = fetched
+
+        watermark = self._read_watermark()
+        if received_at is not None and watermark is not None:
+            if received_at <= watermark:
+                return None  # nothing newer than what we've already processed
+
         urls = extract_list_image_urls(html)
         if not urls:
             return None
@@ -206,10 +241,17 @@ class StockTwitsEmailSource:
             tickers = self._extract_tickers(image, index_key)
             if tickers:
                 result[index_key] = tickers
+
+        if result and received_at is not None:
+            self._write_watermark(received_at)
         return result or None
 
-    def _fetch_latest_email_html(self) -> str | None:
-        """Fetch the newest matching message's HTML body over IMAP, or None."""
+    def _fetch_latest_email(self) -> tuple[datetime | None, str] | None:
+        """Return ``(received_at, html)`` for the newest matching email, or None.
+
+        ``received_at`` is the server's IMAP ``INTERNALDATE`` (received time) as
+        an aware UTC datetime, or ``None`` if it can't be parsed.
+        """
         try:
             with imaplib.IMAP4_SSL(self.config.host, self.config.port) as imap:
                 imap.login(self.config.user, self.config.password)
@@ -224,16 +266,43 @@ class StockTwitsEmailSource:
                 if typ != "OK" or not data or not data[0]:
                     return None
                 latest_id = data[0].split()[-1]
-                typ, msg_data = imap.fetch(latest_id, "(RFC822)")
+                typ, msg_data = imap.fetch(latest_id, "(INTERNALDATE RFC822)")
                 if typ != "OK" or not msg_data or not msg_data[0]:
                     return None
-                raw = msg_data[0][1]
+                envelope, raw = msg_data[0][0], msg_data[0][1]
                 if not isinstance(raw, (bytes, bytearray)):
                     return None
                 message = email.message_from_bytes(raw, policy=_DEFAULT_POLICY)
-                return _html_body(message)
+                html = _html_body(message)
+                if html is None:
+                    return None
+                return _parse_internaldate(envelope), html
         except Exception:
             return None
+
+    def _read_watermark(self) -> datetime | None:
+        """Return the last-processed email's received time, or None."""
+        try:
+            raw = json.loads(self.watermark_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        stamp = raw.get("last_seen") if isinstance(raw, dict) else None
+        if not stamp:
+            return None
+        try:
+            return datetime.fromisoformat(str(stamp))
+        except ValueError:
+            return None
+
+    def _write_watermark(self, received_at: datetime) -> None:
+        """Persist ``received_at`` as the new watermark (best effort)."""
+        try:
+            self.watermark_path.write_text(
+                json.dumps({"last_seen": received_at.isoformat()}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def _download_image(self, url: str) -> _Image | None:
         """Download an image URL, or None on any request/HTTP failure."""

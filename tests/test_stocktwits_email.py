@@ -8,6 +8,7 @@ graceful-skip failures, the enabled gate, and the end-to-end load() orchestratio
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +21,7 @@ from app.integrations.stocktwits_email import (
     ImapConfig,
     StockTwitsEmailSource,
     _detect_media_type,
+    _parse_internaldate,
     extract_list_image_urls,
 )
 
@@ -85,6 +87,20 @@ class TestDetectMediaType:
 
     def test_unknown_defaults_to_jpeg(self) -> None:
         assert _detect_media_type(b"not an image") == "image/jpeg"
+
+
+# --- INTERNALDATE parsing --------------------------------------------------
+
+
+class TestParseInternaldate:
+    def test_parses_to_utc(self) -> None:
+        envelope = b'1 (INTERNALDATE "01-Aug-2026 20:03:54 +0100" RFC822 {123}'
+        parsed = _parse_internaldate(envelope)
+        # 20:03:54 +0100 == 19:03:54 UTC
+        assert parsed == datetime(2026, 8, 1, 19, 3, 54, tzinfo=timezone.utc)
+
+    def test_unparseable_returns_none(self) -> None:
+        assert _parse_internaldate(b"no date here") is None
 
 
 # --- enabled gate ----------------------------------------------------------
@@ -197,23 +213,33 @@ class TestExtractTickers:
 # --- load() orchestration --------------------------------------------------
 
 
+def _make_source(tmp_path: Path, api_key: str = "sk-test") -> StockTwitsEmailSource:
+    return StockTwitsEmailSource(
+        config=_config(), api_key=api_key, watermark_path=tmp_path / "wm.json"
+    )
+
+
+_WHEN = datetime(2026, 8, 1, 19, 3, 54, tzinfo=timezone.utc)
+
+
 class TestLoad:
     def test_disabled_returns_none_without_io(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         def _boom(*_a: Any, **_k: Any) -> Any:
             raise AssertionError("should not touch IMAP when disabled")
 
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.setattr(stocktwits_email.imaplib, "IMAP4_SSL", _boom)
-        src = StockTwitsEmailSource(config=_config(), api_key="")
+        src = _make_source(tmp_path, api_key="")
         assert src.load() is None
 
     def test_end_to_end_with_sample_email(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        src = StockTwitsEmailSource(config=_config(), api_key="sk-test")
+        src = _make_source(tmp_path)
         # Stub the three IO boundaries: email fetch, image download, vision.
-        monkeypatch.setattr(src, "_fetch_latest_email_html", lambda: SAMPLE_HTML)
+        monkeypatch.setattr(src, "_fetch_latest_email", lambda: (_WHEN, SAMPLE_HTML))
         monkeypatch.setattr(
             src,
             "_download_image",
@@ -230,19 +256,94 @@ class TestLoad:
         assert result is not None
         assert set(result) == {"sp500", "nasdaq100", "russell2000"}
         assert result["sp500"] == ["SP5001", "SP5002"]
+        # watermark advanced to the email's received time
+        assert src._read_watermark() == _WHEN
 
-    def test_returns_none_when_no_email(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        src = StockTwitsEmailSource(config=_config(), api_key="sk-test")
-        monkeypatch.setattr(src, "_fetch_latest_email_html", lambda: None)
+    def test_returns_none_when_no_email(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        src = _make_source(tmp_path)
+        monkeypatch.setattr(src, "_fetch_latest_email", lambda: None)
         assert src.load() is None
 
     def test_returns_none_when_all_images_fail(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        src = StockTwitsEmailSource(config=_config(), api_key="sk-test")
-        monkeypatch.setattr(src, "_fetch_latest_email_html", lambda: SAMPLE_HTML)
+        src = _make_source(tmp_path)
+        monkeypatch.setattr(src, "_fetch_latest_email", lambda: (_WHEN, SAMPLE_HTML))
         monkeypatch.setattr(src, "_download_image", lambda url: None)
         assert src.load() is None
+        # no result -> watermark not advanced
+        assert src._read_watermark() is None
+
+
+# --- watermark gating ------------------------------------------------------
+
+
+class TestWatermark:
+    def _stub_pipeline(
+        self, monkeypatch: pytest.MonkeyPatch, src: StockTwitsEmailSource
+    ) -> list[str]:
+        """Stub download + vision; return a list that records vision calls."""
+        calls: list[str] = []
+
+        def _fake_extract(image: Any, index_key: str) -> list[str]:
+            calls.append(index_key)
+            return [f"{index_key.upper()}1"]
+
+        monkeypatch.setattr(
+            src,
+            "_download_image",
+            lambda url: stocktwits_email._Image(b"\xff\xd8\xff", "image/jpeg"),
+        )
+        monkeypatch.setattr(src, "_extract_tickers", _fake_extract)
+        return calls
+
+    def test_skips_when_not_newer_than_watermark(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        src = _make_source(tmp_path)
+        src._write_watermark(_WHEN)
+        calls = self._stub_pipeline(monkeypatch, src)
+        # Same received time as the watermark -> already seen.
+        monkeypatch.setattr(src, "_fetch_latest_email", lambda: (_WHEN, SAMPLE_HTML))
+
+        assert src.load() is None
+        assert calls == []  # vision never invoked
+
+    def test_processes_when_strictly_newer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        src = _make_source(tmp_path)
+        src._write_watermark(_WHEN)
+        calls = self._stub_pipeline(monkeypatch, src)
+        newer = _WHEN.replace(day=8)
+        monkeypatch.setattr(src, "_fetch_latest_email", lambda: (newer, SAMPLE_HTML))
+
+        result = src.load()
+
+        assert result is not None
+        assert calls == list(stocktwits_email.INDEX_KEYS)
+        assert src._read_watermark() == newer
+
+    def test_first_run_without_watermark_processes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        src = _make_source(tmp_path)
+        calls = self._stub_pipeline(monkeypatch, src)
+        monkeypatch.setattr(src, "_fetch_latest_email", lambda: (_WHEN, SAMPLE_HTML))
+
+        assert src.load() is not None
+        assert calls == list(stocktwits_email.INDEX_KEYS)
+
+    def test_missing_watermark_file_reads_none(self, tmp_path: Path) -> None:
+        src = _make_source(tmp_path)
+        assert src._read_watermark() is None
+
+    def test_watermark_round_trip(self, tmp_path: Path) -> None:
+        src = _make_source(tmp_path)
+        src._write_watermark(_WHEN)
+        assert src._read_watermark() == _WHEN
 
 
 # --- ExtractionAgent integration (email-first, config fallback) ------------
