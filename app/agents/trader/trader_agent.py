@@ -582,10 +582,19 @@ class TraderAgent(Agent):
 
         with open(csv_path, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or []
+            # Some provider exports prepend a run of BOM characters to the very
+            # first header cell (e.g. "﻿...﻿Date"). ``utf-8-sig``
+            # strips only one, so the first column key stays polluted and every
+            # ``row.get("Date")`` misses it — silently blanking the trade date
+            # (#166). Normalise the header names before reading rows so the
+            # value lookups use the clean column names.
+            reader.fieldnames = [
+                (h or "").replace("﻿", "").strip() for h in (reader.fieldnames or [])
+            ]
+            fieldnames = reader.fieldnames
             rows = list(reader)
 
-        present = {(h or "").replace("﻿", "").strip() for h in fieldnames}
+        present = set(fieldnames)
         missing = [c for c in REQUIRED_SIPP_COLUMNS if c not in present]
         if missing:
             raise SippImportError(
