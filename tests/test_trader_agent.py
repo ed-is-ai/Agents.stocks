@@ -107,6 +107,13 @@ def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None
     assert trades[0].date == "2024-02-01"  # not blank
 
 
+def test_to_iso_date_strips_embedded_bom() -> None:
+    # Some exports embed BOM chars mid-value (e.g. "12/10/2﻿﻿020"); the
+    # date must still parse rather than being stored as a polluted string (#166).
+    assert _to_iso_date("12/10/2﻿﻿﻿020") == "2020-10-12"
+    assert _to_iso_date("﻿2024-02-01") == "2024-02-01"
+
+
 def test_oversell_is_logged_and_clamped(tmp_path: Path, caplog) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"

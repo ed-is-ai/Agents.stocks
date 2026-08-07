@@ -55,9 +55,11 @@ def _to_iso_date(value: str) -> str:
 
     Accepts the SIPP CSV's ``DD/MM/YYYY`` and already-ISO ``YYYY-MM-DD``.
     Unrecognized formats are logged and returned unchanged so a single odd
-    row never aborts an import.
+    row never aborts an import. BOM characters (which some provider exports
+    embed even mid-value, e.g. ``12/10/2﻿﻿020``) are stripped first
+    so a polluted date still parses (#166).
     """
-    value = value.strip()
+    value = value.replace("﻿", "").strip()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
         try:
             return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
