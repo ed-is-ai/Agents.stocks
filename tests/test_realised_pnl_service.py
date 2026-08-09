@@ -705,3 +705,178 @@ def test_realised_pnl_service_calls_ticker_currency_not_yfinance_directly(
 
     assert calls == ["TEST1"]
     assert "yfinance" not in inspect.getsource(RealisedPnlService)
+
+
+# --- Story 1.3: unmatched-sell detection -----------------------------------
+
+
+def test_zero_lot_sell_produces_one_unmatched_sell_full_quantity(
+    tmp_path: Path,
+) -> None:
+    """I/O matrix: a SELL for a ticker with no open lots at all produces one
+    UnmatchedSell for the full quantity and zero Round-trips."""
+    service, agent = _make_service_with_agent(tmp_path)
+    sell = agent.record_sell(
+        "NEVERBOUGHT", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 0
+    assert summary.unmatched_count == 1
+    assert len(summary.unmatched_sells) == 1
+    unmatched = summary.unmatched_sells[0]
+    assert unmatched.trade_id == sell.id
+    assert unmatched.ticker == "NEVERBOUGHT"
+    assert unmatched.portfolio_id == PORTFOLIO_ID
+    assert unmatched.date == "2026-01-01"
+    assert unmatched.shares == 5
+    assert unmatched.price == 100.0
+    # Zero prior lots: the "no prior BUY" reason applies verbatim.
+    assert unmatched.reason == "No prior BUY found to match this sell"
+    assert unmatched.acknowledged_at is None
+
+
+def test_partial_shortfall_sell_produces_round_trip_and_unmatched_remainder(
+    tmp_path: Path,
+) -> None:
+    """I/O matrix: a SELL quantity exceeding available lot shares produces
+    one Round-trip for the covered portion and one UnmatchedSell for the
+    shortfall, with UnmatchedSell.shares equal to the shortfall."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    sell = agent.record_sell("TEST1", 8, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 1
+    rt = summary.round_trips["TEST1"][0]
+    assert rt.shares == 5
+    assert summary.unmatched_count == 1
+    unmatched = summary.unmatched_sells[0]
+    assert unmatched.trade_id == sell.id
+    assert unmatched.ticker == "TEST1"
+    assert unmatched.shares == 3
+    assert unmatched.price == 150.0
+    assert unmatched.date == "2026-02-01"
+    # A BUY *was* found and partially consumed -- the "no prior BUY" wording
+    # would be factually wrong here; the shortfall-specific reason applies.
+    assert unmatched.reason == "Sell exceeds available BUY lots by 3 shares"
+
+
+def test_multi_lot_sell_produces_round_trips_and_unmatched_shortfall(
+    tmp_path: Path,
+) -> None:
+    """I/O matrix extension: a SELL that drains two open lots before still
+    falling short produces one Round-trip per lot consumed *and* one
+    UnmatchedSell for the remaining shortfall -- exercising the interaction
+    between multi-lot consumption and unmatched-sell emission together."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("TEST1", 2, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("TEST1", 3, 110.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    sell = agent.record_sell("TEST1", 9, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 2
+    rts = summary.round_trips["TEST1"]
+    assert sorted((rt.entry_price, rt.shares) for rt in rts) == [
+        (100.0, 2.0),
+        (110.0, 3.0),
+    ]
+    assert summary.unmatched_count == 1
+    unmatched = summary.unmatched_sells[0]
+    assert unmatched.trade_id == sell.id
+    assert unmatched.shares == 4
+    assert unmatched.reason == "Sell exceeds available BUY lots by 4 shares"
+
+
+def test_two_consecutive_unmatched_sells_same_ticker(tmp_path: Path) -> None:
+    """Two SELLs in a row for the same ticker, both with no open lot
+    available (the second SELL hits an already-drained, not merely
+    never-populated, queue), each produce their own distinct
+    UnmatchedSell -- not merged, not overwritten."""
+    service, agent = _make_service_with_agent(tmp_path)
+    first_sell = agent.record_sell(
+        "TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    second_sell = agent.record_sell(
+        "TEST1", 3, 110.0, "2026-01-02", portfolio_id=PORTFOLIO_ID
+    )
+    assert first_sell.id is not None
+    assert second_sell.id is not None
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 0
+    assert summary.unmatched_count == 2
+    by_trade_id = {u.trade_id: u for u in summary.unmatched_sells}
+    assert by_trade_id[first_sell.id].shares == 5
+    assert by_trade_id[first_sell.id].date == "2026-01-01"
+    assert by_trade_id[second_sell.id].shares == 3
+    assert by_trade_id[second_sell.id].date == "2026-01-02"
+
+
+def test_unmatched_sell_never_retroactively_filled_by_later_buy(
+    tmp_path: Path,
+) -> None:
+    """AC #5 regression: a SELL with no open lot, followed chronologically
+    by a later-dated BUY for the same ticker, must not be retroactively
+    filled. The SELL stays fully unmatched and the later BUY's shares stay
+    open (available to a future SELL, never spent on the earlier one).
+
+    This guards against a two-pass implementation ("match sells first, then
+    reconcile leftovers against all buys") instead of the required single
+    forward chronological replay.
+    """
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_sell("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("TEST1", 5, 90.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    # (a) the earlier SELL still appears as an UnmatchedSell, unchanged.
+    assert summary.round_trip_count == 0
+    assert summary.unmatched_count == 1
+    unmatched = summary.unmatched_sells[0]
+    assert unmatched.date == "2026-01-01"
+    assert unmatched.shares == 5
+
+    # (b)/(c) the later BUY's shares are not consumed by the earlier SELL --
+    # they remain part of the ticker's open-lot position, so a subsequent
+    # SELL can still match against them.
+    agent.record_sell("TEST1", 5, 120.0, "2026-03-01", portfolio_id=PORTFOLIO_ID)
+    summary_after = service.compute_summary(PORTFOLIO_ID)
+    assert summary_after.round_trip_count == 1
+    rt = summary_after.round_trips["TEST1"][0]
+    assert rt.entry_date == "2026-02-01"
+    assert rt.entry_price == 90.0
+    assert rt.shares == 5
+    # The original SELL is still unmatched; only it, not the new SELL.
+    assert summary_after.unmatched_count == 1
+    assert summary_after.unmatched_sells[0].date == "2026-01-01"
+
+
+def test_unmatched_count_always_equals_len_unmatched_sells(tmp_path: Path) -> None:
+    """unmatched_count and len(unmatched_sells) must always agree -- the
+    separate counter is retired in favour of deriving it from the list."""
+    service, agent = _make_service_with_agent(tmp_path)
+    sell1 = agent.record_sell(
+        "TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    agent.record_buy("TEST2", 3, 50.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    sell2 = agent.record_sell("TEST2", 5, 60.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    assert sell1.id is not None
+    assert sell2.id is not None
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.unmatched_count == len(summary.unmatched_sells)
+    assert summary.unmatched_count == 2
+    # Not just the aggregate count -- each record maps to the right trade,
+    # not mixed up between tickers/dates/shares.
+    by_trade_id = {u.trade_id: u for u in summary.unmatched_sells}
+    assert by_trade_id[sell1.id].ticker == "TEST1"
+    assert by_trade_id[sell1.id].shares == 5
+    assert by_trade_id[sell2.id].ticker == "TEST2"
+    assert by_trade_id[sell2.id].shares == 2  # 5 sold - 3 bought = 2 short
