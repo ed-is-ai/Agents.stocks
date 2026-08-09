@@ -1,9 +1,9 @@
-"""Realised P&L service — FIFO lot matching, round-trip shaping, and
-trade-date GBP conversion.
+"""Realised P&L service — FIFO lot matching, round-trip shaping, trade-date
+GBP conversion, and unmatched-sell detection.
 
 Epic 1, Story 1.1 (FIFO matching) + Story 1.2 (trade-date FX conversion with
-historical rate caching). Unmatched-sell shaping (Story 1.3) and
-acknowledgment (Story 1.5) are later stories layered on top without changing
+historical rate caching) + Story 1.3 (unmatched-sell detection).
+Acknowledgment (Story 1.5) is a later story layered on top without changing
 this story's schema fields.
 """
 
@@ -14,7 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date
 
-from app.schemas import RealisedPnlSummary, RoundTrip, Trade
+from app.schemas import RealisedPnlSummary, RoundTrip, Trade, UnmatchedSell
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 # compare floats with a bare `==`.
 _EPSILON = 1e-6
 _INVALID_TICKERS = {"", "n/a", "N/A"}
+
+# Story 1.3: two reason strings depending on whether any prior lot existed
+# at all for this SELL, vs. whether one or more lots existed and were
+# partially consumed before running out -- "no prior BUY found" is
+# factually wrong for the second case (a BUY plainly *was* found).
+_NO_PRIOR_BUY_REASON = "No prior BUY found to match this sell"
+_PARTIAL_SHORTFALL_REASON = "Sell exceeds available BUY lots by {shares:g} shares"
+
+# Share-quantity precision for an UnmatchedSell's `shares` -- matches the
+# `_EPSILON` tolerance used for lot-consumption comparisons, so a SELL that
+# is (within tolerance) fully matched never surfaces as a spurious
+# near-zero UnmatchedSell, and a genuine shortfall never displays
+# float-subtraction residue like `2.9999999997` in the UI.
+_SHARES_PRECISION = 6
 
 
 def _round2(x: float) -> float:
@@ -92,7 +106,7 @@ class RealisedPnlService:
         persisted (AC 6).
         """
         trades = self._sorted_valid_trades(portfolio_id)
-        raw_round_trips, open_lots, unmatched_count = self._replay_fifo(
+        raw_round_trips, open_lots, unmatched_sells = self._replay_fifo(
             trades, portfolio_id
         )
         round_trips = self._convert_to_gbp(raw_round_trips)
@@ -108,7 +122,8 @@ class RealisedPnlService:
             round_trips=grouped,
             total_realised_pnl_gbp=total_pnl,
             round_trip_count=len(round_trips),
-            unmatched_count=unmatched_count,
+            unmatched_count=len(unmatched_sells),
+            unmatched_sells=unmatched_sells,
             mismatched_tickers=mismatched,
         )
 
@@ -144,27 +159,32 @@ class RealisedPnlService:
 
     def _replay_fifo(
         self, trades: list[Trade], portfolio_id: int
-    ) -> tuple[list[_RawRoundTrip], dict[str, deque[_Lot]], int]:
+    ) -> tuple[list[_RawRoundTrip], dict[str, deque[_Lot]], list[UnmatchedSell]]:
         """Replay trades in order, FIFO-matching SELLs against open lots.
 
         On BUY, push a new lot onto that ticker's queue. On SELL, pop from
         the front, consuming up to ``shares_remaining`` per lot until the
         sold quantity is satisfied or the queue empties; a fully-consumed
         lot is dequeued immediately so it can never be re-matched. If the
-        queue empties before a SELL is fully satisfied, matching for that
-        SELL simply stops — no exception, no fabricated lot, and the
-        shortfall is only counted (``unmatched_count``), never shaped into
-        a return value (Story 1.3's job).
+        queue empties before a SELL is fully satisfied (including the
+        fully-empty-queue case), the unconsumed remainder is emitted as an
+        ``UnmatchedSell`` (Story 1.3) and matching for that SELL stops — no
+        exception, no fabricated lot. This is a single forward pass over
+        chronologically-sorted trades: an ``UnmatchedSell`` is never
+        revisited or retroactively filled by a later BUY for the same
+        ticker, because the SELL that produced it is never re-examined once
+        the loop has moved past it.
         """
         queues: dict[str, deque[_Lot]] = {}
         round_trips: list[_RawRoundTrip] = []
-        unmatched_count = 0
+        unmatched_sells: list[UnmatchedSell] = []
         for t in trades:
             queue = queues.setdefault(t.ticker, deque())
             if t.action == "BUY":
                 queue.append(_Lot(t.shares, t.price, t.date))
                 continue
             remaining_to_sell = t.shares
+            any_lot_matched = False
             while remaining_to_sell > _EPSILON and queue:
                 lot = queue[0]
                 matched = min(lot.shares_remaining, remaining_to_sell)
@@ -173,11 +193,36 @@ class RealisedPnlService:
                 )
                 lot.shares_remaining -= matched
                 remaining_to_sell -= matched
+                any_lot_matched = True
                 if lot.shares_remaining <= _EPSILON:
                     queue.popleft()
+            remaining_to_sell = round(remaining_to_sell, _SHARES_PRECISION)
             if remaining_to_sell > _EPSILON:
-                unmatched_count += 1
-        return round_trips, queues, unmatched_count
+                if t.id is None:
+                    logger.warning(
+                        "Realised P&L: unmatched SELL for %s has no trade id "
+                        "-- this should be unreachable for a persisted row; "
+                        "falling back to trade_id=0",
+                        t.ticker,
+                    )
+                reason = (
+                    _PARTIAL_SHORTFALL_REASON.format(shares=remaining_to_sell)
+                    if any_lot_matched
+                    else _NO_PRIOR_BUY_REASON
+                )
+                unmatched_sells.append(
+                    UnmatchedSell(
+                        trade_id=t.id or 0,
+                        ticker=t.ticker,
+                        portfolio_id=portfolio_id,
+                        date=t.date,
+                        shares=remaining_to_sell,
+                        price=t.price,
+                        reason=reason,
+                        acknowledged_at=None,
+                    )
+                )
+        return round_trips, queues, unmatched_sells
 
     @staticmethod
     def _build_raw_round_trip(
