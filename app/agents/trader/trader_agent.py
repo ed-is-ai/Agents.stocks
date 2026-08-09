@@ -22,6 +22,7 @@ from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
 from app.repositories.cash_flows_repo import CashFlowsRepository
 from app.repositories.db import Connect
+from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
@@ -94,6 +95,7 @@ class TraderAgent(Agent):
     _artifacts: ArtifactsRepository = PrivateAttr()
     _portfolios: PortfoliosRepository = PrivateAttr()
     _snapshots: PortfolioSnapshotsRepository = PrivateAttr()
+    _fx_rates: FxRateCacheRepository = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
@@ -104,6 +106,7 @@ class TraderAgent(Agent):
         self._artifacts = ArtifactsRepository()
         self._portfolios = PortfoliosRepository(connect)
         self._snapshots = PortfolioSnapshotsRepository(connect)
+        self._fx_rates = FxRateCacheRepository(connect)
         self._init_db()
 
     # --- portfolio CRUD (#147) -------------------------------------------
@@ -791,6 +794,14 @@ class TraderAgent(Agent):
             r[0]: (r[4], r[3] or "GBP") for r in rows if r[4] is not None
         }
         return prices, fetched_at, display_info
+
+    def get_cached_fx_rates(self, dates: list[str]) -> dict[str, float]:
+        """Return every cached ``{date: gbpusd_rate}`` row for ``dates``."""
+        return self._fx_rates.get_many(dates)
+
+    def save_fx_rates(self, rates: dict[str, float]) -> None:
+        """Persist resolved ``{date: gbpusd_rate}`` rows to the cache."""
+        self._fx_rates.upsert_many(rates)
 
     def set_cash_balance(self, amount: float, portfolio_id: int | None = None) -> None:
         """Persist a portfolio's cash balance (Running Balance) to account_state."""
