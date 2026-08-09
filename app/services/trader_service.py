@@ -175,6 +175,10 @@ class TraderService:
         """Delete a trade by ID. Returns True if a row was deleted."""
         return self._agent.delete_trade(trade_id)
 
+    def set_unmatched_sell_ack(self, trade_id: int, acknowledged: bool) -> None:
+        """Set or clear an unmatched sell's acknowledgment (AD-6 passthrough)."""
+        self._agent.set_unmatched_sell_ack(trade_id, acknowledged)
+
     def import_sipp(
         self, csv_path: str | Path, portfolio_id: int | None = None
     ) -> SippImportResult:

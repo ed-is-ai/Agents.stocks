@@ -179,6 +179,22 @@ class TraderAgent(Agent):
             self.set_cash_balance(opening_cash, pf.id)
         return self.get_portfolio_meta(pf.id) or pf
 
+    def set_unmatched_sell_ack(self, trade_id: int, acknowledged: bool) -> None:
+        """Set or clear an unmatched sell's realised-P&L acknowledgment (AD-6).
+
+        The sole writer of ``trades.realised_pnl_ack_at``. Called only via
+        ``TraderService``'s passthrough, whose only caller is
+        ``RealisedPnlService`` (AD-6).
+        """
+        from datetime import timezone
+
+        acknowledged_at = (
+            datetime.now(timezone.utc).isoformat() if acknowledged else None
+        )
+        with self._conn() as conn:
+            self._trades.set_ack(conn, trade_id, acknowledged_at)
+            conn.commit()
+
     def rename_portfolio(self, portfolio_id: int, name: str) -> bool:
         """Rename a portfolio. Returns True if it existed."""
         return self._portfolios.rename(portfolio_id, name.strip() or "Untitled")

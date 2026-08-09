@@ -23,6 +23,26 @@ def test_record_multiple_buys(tmp_path: Path) -> None:
     assert sum(position.shares for position in portfolio) == 3.0
 
 
+def test_set_unmatched_sell_ack_persists_and_clears(tmp_path: Path) -> None:
+    """Story 1.5, AC #7: ``set_unmatched_sell_ack`` writes a non-null ISO
+    timestamp when acknowledged, and clears it back to ``None`` when
+    un-acknowledged -- read back through the real repository/DB."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    sell = agent.record_sell("TEST1", 5, 100.0, "2026-01-01")
+    assert sell.id is not None
+
+    agent.set_unmatched_sell_ack(sell.id, True)
+    history = {t.id: t for t in agent.get_trade_history()}
+    assert history[sell.id].realised_pnl_ack_at is not None
+
+    agent.set_unmatched_sell_ack(sell.id, False)
+    history = {t.id: t for t in agent.get_trade_history()}
+    assert history[sell.id].realised_pnl_ack_at is None
+
+
 def test_get_and_save_cached_fx_rates_round_trip(tmp_path: Path) -> None:
     """Story 1.2: TraderAgent's get/save_cached_fx_rates wiring persists
     through a real FxRateCacheRepository against a real DB."""

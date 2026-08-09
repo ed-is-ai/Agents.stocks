@@ -182,7 +182,12 @@ def _migrate_default_portfolio(conn: sqlite3.Connection) -> None:
 def init_trades_db(conn: sqlite3.Connection) -> None:
     """Create the ``trades.db`` schema and apply additive migrations."""
     conn.executescript(_SCHEMA)
-    for col_def in ("stop_loss REAL", "entry_price REAL", "reference TEXT"):
+    for col_def in (
+        "stop_loss REAL",
+        "entry_price REAL",
+        "reference TEXT",
+        "realised_pnl_ack_at TEXT",
+    ):
         try:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
         except sqlite3.OperationalError as exc:

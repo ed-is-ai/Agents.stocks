@@ -63,6 +63,28 @@ def test_trades_insert_ignore_dedupes_reference(trades_connect):
     assert len(repo.history("AAPL")) == 1
 
 
+def test_trades_set_ack_writes_and_clears(trades_connect):
+    """Story 1.5, AC #7: ``set_ack`` writes/clears ``realised_pnl_ack_at``,
+    and only the targeted row is affected (an untouched trade stays
+    ``None``)."""
+    repo = TradesRepository(trades_connect)
+    target_id = repo.insert("AAPL", "SELL", 5, 100.0, "01/02/2024")
+    other_id = repo.insert("MSFT", "BUY", 5, 200.0, "02/02/2024")
+
+    with db.session(trades_connect) as conn:
+        repo.set_ack(conn, target_id, "2026-08-09T12:00:00+00:00")
+
+    history = {t.id: t for t in repo.history()}
+    assert history[target_id].realised_pnl_ack_at == "2026-08-09T12:00:00+00:00"
+    assert history[other_id].realised_pnl_ack_at is None
+
+    with db.session(trades_connect) as conn:
+        repo.set_ack(conn, target_id, None)
+
+    history = {t.id: t for t in repo.history()}
+    assert history[target_id].realised_pnl_ack_at is None
+
+
 # --- CashFlowsRepository ---------------------------------------------------
 
 

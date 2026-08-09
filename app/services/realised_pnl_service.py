@@ -127,6 +127,30 @@ class RealisedPnlService:
             mismatched_tickers=mismatched,
         )
 
+    def toggle_unmatched_sell_ack(
+        self, trade_id: int, portfolio_id: int
+    ) -> RealisedPnlSummary:
+        """Flip one unmatched sell's acknowledgment and return the fresh summary.
+
+        Looks up the sell's current ``acknowledged_at`` in a freshly
+        computed summary and writes the opposite (AD-8: pure toggle of
+        current state, no acknowledged value accepted from the caller). If
+        ``trade_id`` isn't among the current unmatched sells (e.g. a stale
+        click), this is a no-op — no exception, no write. Recomputes after
+        writing, since Round-trip/unmatched-sell results are never cached
+        (AD-7).
+        """
+        summary = self.compute_summary(portfolio_id)
+        target = next(
+            (u for u in summary.unmatched_sells if u.trade_id == trade_id), None
+        )
+        if target is not None:
+            self._trader.set_unmatched_sell_ack(
+                trade_id, target.acknowledged_at is None
+            )
+            summary = self.compute_summary(portfolio_id)
+        return summary
+
     def _sorted_valid_trades(self, portfolio_id: int) -> list[Trade]:
         """Fetch, filter, and sort trades for FIFO replay.
 
@@ -219,7 +243,7 @@ class RealisedPnlService:
                         shares=remaining_to_sell,
                         price=t.price,
                         reason=reason,
-                        acknowledged_at=None,
+                        acknowledged_at=t.realised_pnl_ack_at,
                     )
                 )
         return round_trips, queues, unmatched_sells

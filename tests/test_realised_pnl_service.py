@@ -880,3 +880,52 @@ def test_unmatched_count_always_equals_len_unmatched_sells(tmp_path: Path) -> No
     assert by_trade_id[sell1.id].shares == 5
     assert by_trade_id[sell2.id].ticker == "TEST2"
     assert by_trade_id[sell2.id].shares == 2  # 5 sold - 3 bought = 2 short
+
+
+# --- Story 1.5: unmatched-sell acknowledge interaction ---------------------
+
+
+def test_unmatched_sell_acknowledged_at_reflects_persisted_trade_state(
+    tmp_path: Path,
+) -> None:
+    """Read-side wiring: ``UnmatchedSell.acknowledged_at`` reflects the
+    underlying trade's ``realised_pnl_ack_at`` (previously hard-coded
+    ``None`` before Story 1.5's read path was wired)."""
+    service, agent = _make_service_with_agent(tmp_path)
+    sell = agent.record_sell(
+        "NEVERBOUGHT", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    assert sell.id is not None
+    agent.set_unmatched_sell_ack(sell.id, True)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.unmatched_sells[0].acknowledged_at is not None
+
+
+def test_toggle_unmatched_sell_ack_sets_then_clears(tmp_path: Path) -> None:
+    """AC #5/#6/#7: toggling an unacknowledged entry acknowledges it (with a
+    fresh, recomputed summary reflecting the change); toggling again clears
+    it back to unacknowledged."""
+    service, agent = _make_service_with_agent(tmp_path)
+    sell = agent.record_sell(
+        "NEVERBOUGHT", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    assert sell.id is not None
+
+    acked_summary = service.toggle_unmatched_sell_ack(sell.id, PORTFOLIO_ID)
+    assert acked_summary.unmatched_sells[0].acknowledged_at is not None
+
+    unacked_summary = service.toggle_unmatched_sell_ack(sell.id, PORTFOLIO_ID)
+    assert unacked_summary.unmatched_sells[0].acknowledged_at is None
+
+
+def test_toggle_unmatched_sell_ack_unknown_trade_id_is_noop(tmp_path: Path) -> None:
+    """A stale/unknown trade_id is a no-op: no write, no exception, and the
+    current (unchanged) summary is returned."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_sell("NEVERBOUGHT", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.toggle_unmatched_sell_ack(999999, PORTFOLIO_ID)
+
+    assert summary.unmatched_sells[0].acknowledged_at is None
