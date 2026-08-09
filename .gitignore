@@ -23,6 +23,7 @@ agents/ii_platform/debug/
 
 # Runtime outputs
 *.db
+*.db.bak-*
 # VCP screener last-known-good constituent cache (regenerated at runtime)
 skills/vcp-screener/scripts/.cache/
 **/scan_results.json
@@ -47,6 +48,7 @@ portfolio_value.csv
 pipeline_runs.csv
 app/agents/extraction/ww_context.json
 app/agents/extraction/stocktwits_email_watermark.json
+app/agents/extraction/extraction_results.json
 app/agents/scanner/scan_history.json
 app/agents/trader/trades.db.backup
 **/scan_history.json
@@ -70,6 +72,9 @@ scratch/
 .vscode/
 *.code-workspace
 
+# macOS
+.DS_Store
+
 # Notebooks checkpoints
 .ipynb_checkpoints/
 
@@ -79,3 +84,7 @@ softaworks-agent-toolkit/
 # spec-gen analysis artifacts
 .spec-gen/
 .spec-gen/decisions/
+
+# BMad workflow output (local planning/implementation artifacts)
+_bmad/
+_bmad-output/
