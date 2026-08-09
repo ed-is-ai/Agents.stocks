@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS account_state (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS fx_rate_cache (
+    date        TEXT PRIMARY KEY,
+    gbpusd_rate REAL
+);
 """
 
 #: Name of the default portfolio existing single-portfolio data migrates into.

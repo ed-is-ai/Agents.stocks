@@ -7,6 +7,7 @@ from app.repositories.account_repo import AccountStateRepository
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
 from app.repositories.cash_flows_repo import CashFlowsRepository
+from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
 from app.repositories.results_repo import ResultsRepository
 from app.repositories.trades_repo import TradesRepository
@@ -102,6 +103,33 @@ def test_price_cache_upsert_and_load(trades_connect):
     assert len(rows) == 1
     assert rows[0][0] == "AAPL"
     assert rows[0][1] == 110.0
+
+
+# --- FxRateCacheRepository (Story 1.2) --------------------------------------
+
+
+def test_fx_rate_cache_upsert_and_get_many_round_trip(trades_connect):
+    """The real SQL (``IN (...)`` placeholder construction, ``ON CONFLICT``
+    upsert) round-trips correctly against a real SQLite DB -- Story 1.2's
+    service-layer tests only exercise this repository via an in-memory
+    fake, so this is the one test that runs the actual SQL."""
+    repo = FxRateCacheRepository(trades_connect)
+
+    repo.upsert_many({"2026-01-01": 1.3456, "2026-01-02": 1.36})
+    result = repo.get_many(["2026-01-01", "2026-01-02", "2026-01-03"])
+    assert result == {"2026-01-01": 1.3456, "2026-01-02": 1.36}
+    assert "2026-01-03" not in result
+
+    # Upsert overwrites an existing row rather than erroring/duplicating.
+    repo.upsert_many({"2026-01-01": 1.40})
+    assert repo.get_many(["2026-01-01"]) == {"2026-01-01": 1.40}
+
+    # A dumb store: an invalid stored value round-trips unfiltered --
+    # PortfolioService, not this repository, is responsible for filtering.
+    repo.upsert_many({"2026-01-04": -1.0})
+    assert repo.get_many(["2026-01-04"]) == {"2026-01-04": -1.0}
+
+    assert repo.get_many([]) == {}
 
 
 # --- AccountStateRepository ------------------------------------------------

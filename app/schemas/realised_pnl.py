@@ -11,11 +11,12 @@ from pydantic import BaseModel
 class RoundTrip(BaseModel):
     """One closed lot: a SELL matched FIFO against a single BUY lot.
 
-    ``realised_pnl_gbp``/``realised_pnl_pct`` are native-currency placeholders
-    in Story 1.1 (treat ``price`` as if already GBP); Story 1.2 replaces the
-    calculation with true trade-date FX conversion without changing these
-    field names. ``fx_unavailable`` is always ``False`` until Story 1.2 adds
-    FX lookups.
+    ``realised_pnl_gbp``/``realised_pnl_pct`` are GBP amounts, converted
+    per-leg at each leg's own trade-date GBP/USD rate (Story 1.2). When
+    ``fx_unavailable`` is ``True`` (a leg's rate couldn't be resolved), both
+    fields hold a documented ``0.0`` placeholder, never a real figure —
+    every caller must check ``fx_unavailable`` first and exclude the row
+    from any subtotal or total.
     """
 
     ticker: str
