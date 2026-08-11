@@ -15,8 +15,10 @@ from app.api.dependencies import (
     get_portfolio_service,
     get_trader_service,
 )
+from app.api.templating import templates
 from app.schemas.notification import NotificationCategory, NotificationSeverity
-from app.schemas.trade import SippImportResult
+from app.schemas.trade import Portfolio, SippImportResult
+from app.services.portfolio_service import PortfolioService
 
 client = TestClient(app)
 
@@ -315,9 +317,11 @@ def test_row_count_mismatch_flags_error_status_and_severity(
 ):
     """When TraderAgent.import_sipp reports status="error" (buy/sell/cash/
     skipped counts didn't add up to total_rows, #187), the route must carry
-    that through: the banner status context, an ERROR line in the message,
-    and ERROR notification severity — not folded into an ordinary WARNING
-    the way a data-quality skip is."""
+    that through: a non-2xx HTTP status (#210, this story's AC1 — the
+    message/severity contract asserted below is #187's, unchanged by this
+    story), the banner status context, an ERROR line in the message, and
+    ERROR notification severity — not folded into an ordinary WARNING the
+    way a data-quality skip is."""
     mock_trader, _, mock_notifications, _ = mocked_import
     mock_trader.import_sipp.return_value = SippImportResult(
         cash_balance=5000.0,
@@ -337,13 +341,34 @@ def test_row_count_mismatch_flags_error_status_and_severity(
     )
     resp = _upload()
 
-    assert resp.status_code == 200
+    assert resp.status_code == 400
     assert calls[-1]["import_status"] == "error"
     assert "ERROR" in calls[-1]["import_message"]
     assert "3 of 4" in calls[-1]["import_message"]
     assert mock_notifications.record.call_args.kwargs["severity"] == (
         NotificationSeverity.ERROR
     )
+
+
+def test_row_count_mismatch_response_is_not_a_success_status(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Dedicated, single-purpose regression proof of AC1: a status="error"
+    result never returns a 2xx status, independent of the message/severity
+    assertions in the test above."""
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=5000.0,
+        buy_count=2,
+        sell_count=0,
+        cash_flow_count=1,
+        total_rows=4,
+        status="error",
+    )
+    resp = _upload()
+
+    assert resp.status_code >= 400
+    assert resp.status_code < 500
 
 
 def test_forbidden_without_token(monkeypatch: pytest.MonkeyPatch):
@@ -359,3 +384,31 @@ def test_route_module_no_longer_imports_sipp_import_dir():
     import app.api.routes.portfolio as portfolio_route
 
     assert not hasattr(portfolio_route, "SIPP_IMPORT_DIR")
+
+
+def test_rendered_portfolio_partial_includes_portfolio_select_element():
+    """Structural regression guard for Gate 2 (AC3/AC4): index.html's
+    handleSippImportSubmit keys off `#portfolioSelect` to disable/re-enable
+    the account selector for the duration of an in-flight import queue.
+    This proves the element the JS depends on is actually present in a
+    normal (non-empty) rendered `_portfolio.html` partial, so a future
+    markup rename can't silently break Gate 2's lock/discard logic without
+    a test failing. This is a structural proof only — it does not execute
+    JavaScript or prove the runtime disable/discard behavior itself; see
+    the story's Dev Notes "No JS Test Harness Exists" for why, and the new
+    Playwright module for the behavioral proof."""
+    mock_trader = MagicMock()
+    mock_trader.list_portfolios.return_value = [
+        Portfolio(id=1, name="SIPP", created_at="2024-01-01")
+    ]
+    mock_trader.load_price_cache.return_value = ({}, None, {})
+    mock_trader.get_portfolio.return_value = []
+    mock_trader.get_cash_balance.return_value = 0.0
+    mock_trader.get_cash_flows.return_value = []
+    mock_trader.snapshot_history.return_value = []
+
+    service = PortfolioService(mock_trader)
+    ctx = service.default_portfolio_context(1)
+    html = templates.get_template("_portfolio.html").render(**ctx)
+
+    assert 'id="portfolioSelect"' in html
