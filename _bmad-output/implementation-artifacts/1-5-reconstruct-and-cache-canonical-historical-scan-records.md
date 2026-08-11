@@ -5,7 +5,7 @@ github_issue: 188
 
 # Story 1.5: Reconstruct and Cache Canonical Historical Scan Records
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -26,52 +26,65 @@ so that a past monthly snapshot is reproducible without invoking network-bound s
 
 ## Tasks / Subtasks
 
-- [ ] Establish the closed historical scan contract and reconstructability policy (AC: 4, 6, 7)
-  - [ ] Add `app/services/backtest/historical_scan_record.py` containing frozen, strict Pydantic v2 models with `extra='forbid'` and non-finite numbers rejected.
-  - [ ] Define `HistoricalScanRecordV1`, `ReconstructabilityPolicyV1`, detector-fragment envelopes, closed enums, canonical JSON serialization, digesting, and strict round-trip parsing in one module.
-  - [ ] Represent Decimal prices and ratios as canonical decimal strings in JSON; dates use ISO `YYYY-MM-DD`; timestamps use UTC ISO-8601; percentages are percentage points, not fractions.
-  - [ ] Classify every persisted field as reconstructed-required or policy-nullable. Fundamentals, institutional activity, Congress/Senate activity, current watch-list flags, and inferred relative strength are null in V1 because no point-in-time evidence contract exists for them.
-  - [ ] Include durable provenance: source `yfinance`, `universe_basis='captured_configured_roster'`, `roster_captured_at`, `point_in_time_universe=false`, `survivorship_bias='known'`, roster/evidence/calendar/alias revisions, detector versions, and `input_revision`.
+- [x] Establish the closed historical scan contract and reconstructability policy (AC: 4, 6, 7)
+  - [x] Add `app/services/backtest/historical_scan_record.py` containing frozen, strict Pydantic v2 models with `extra='forbid'` and non-finite numbers rejected.
+  - [x] Define `HistoricalScanRecordV1`, `ReconstructabilityPolicyV1`, detector-fragment envelopes, closed enums, canonical JSON serialization, digesting, and strict round-trip parsing in one module.
+  - [x] Represent Decimal prices and ratios as canonical decimal strings in JSON; dates use ISO `YYYY-MM-DD`; timestamps use UTC ISO-8601; percentages are percentage points, not fractions.
+  - [x] Classify every persisted field as reconstructed-required or policy-nullable. Fundamentals, institutional activity, Congress/Senate activity, current watch-list flags, and inferred relative strength are null in V1 because no point-in-time evidence contract exists for them.
+  - [x] Include durable provenance: source `yfinance`, `universe_basis='captured_configured_roster'`, `roster_captured_at`, `point_in_time_universe=false`, `survivorship_bias='known'`, roster/evidence/calendar/alias revisions, detector versions, and `input_revision`.
 
-- [ ] Extract shared pure scanner calculations without changing live behaviour (AC: 1, 2, 3)
-  - [ ] Add dependency-free `app/core/stage_classification.py`; move the exact Analyst Stage and SMA-slope rules there and make `AnalystAgent` delegate to it.
-  - [ ] Add `app/core/technical_indicators.py`; extract the scanner's pure OHLCV technical calculation and preserve `ScannerAgent.compute_technicals` as a compatibility delegate.
-  - [ ] Add characterization/parity tests before extraction and retain existing Analyst/Scanner outputs, ordering, rounding, and null behaviour.
-  - [ ] Define a detector protocol with stable detector ID, algorithm/API version, canonical source-manifest `detector_version`, declared lookback sessions, and a pure `run` operation. `detector_version` is exclusively the SHA-256 source-manifest digest required by AD-5, not a human semantic version.
-  - [ ] Register V1 detectors in fixed order: `technical_indicators_v1`, `weinstein_stage_v1`, and `vcp_v1`. Invoke only pure calculator modules under `skills/vcp-screener/scripts/calculators/`; never import the network-bound screener entry point.
-  - [ ] Centralize conversion from oldest-first market planes to each detector's required order. Validate finite/range-safe values before any explicit Decimal-to-float adapter and reject required null OHLCV rather than coercing it.
-  - [ ] Keep separate compatibility and reconstruction adapters around shared pure calculations. The live compatibility delegate retains existing integer-volume/rounding outputs; reconstruction retains eight-place split-continuous Decimal volume. Update the pure VCP volume calculator to accept finite Decimal-compatible volume without `int()` truncation while preserving identical results for integral live inputs.
-  - [ ] Declare `required_history_sessions` individually and inclusively: `technical_indicators_v1=252`, `weinstein_stage_v1=252`, and `vcp_v1=252`. Each count includes `as_of_session_date` (251 preceding completed sessions plus the target); fewer than 252 valid bounded rows is `required_data_missing`. Expose the registry maximum without adding another 252 sessions.
-  - [ ] Do not infer historical relative-strength rank from current data. Pass no rank to VCP V1 and persist relative-strength fields as policy-approved null; adding benchmark evidence later requires a new detector version and input revision.
+- [x] Extract shared pure scanner calculations without changing live behaviour (AC: 1, 2, 3)
+  - [x] Add dependency-free `app/core/stage_classification.py`; move the exact Analyst Stage and SMA-slope rules there and make `AnalystAgent` delegate to it.
+  - [x] Add `app/core/technical_indicators.py`; extract the scanner's pure OHLCV technical calculation and preserve `ScannerAgent.compute_technicals` as a compatibility delegate.
+  - [x] Add characterization/parity tests before extraction and retain existing Analyst/Scanner outputs, ordering, rounding, and null behaviour.
+  - [x] Define a detector protocol with stable detector ID, algorithm/API version, canonical source-manifest `detector_version`, declared lookback sessions, and a pure `run` operation. `detector_version` is exclusively the SHA-256 source-manifest digest required by AD-5, not a human semantic version.
+  - [x] Register V1 detectors in fixed order: `technical_indicators_v1`, `weinstein_stage_v1`, and `vcp_v1`. Invoke only pure calculator modules under `skills/vcp-screener/scripts/calculators/`; never import the network-bound screener entry point.
+  - [x] Centralize conversion from oldest-first market planes to each detector's required order. Validate finite/range-safe values before any explicit Decimal-to-float adapter and reject required null OHLCV rather than coercing it.
+  - [x] Keep separate compatibility and reconstruction adapters around shared pure calculations. The live compatibility delegate retains existing integer-volume/rounding outputs; reconstruction retains eight-place split-continuous Decimal volume. Update the pure VCP volume calculator to accept finite Decimal-compatible volume without `int()` truncation while preserving identical results for integral live inputs.
+  - [x] Declare `required_history_sessions` individually and inclusively: `technical_indicators_v1=252`, `weinstein_stage_v1=252`, and `vcp_v1=252`. Each count includes `as_of_session_date` (251 preceding completed sessions plus the target); fewer than 252 valid bounded rows is `required_data_missing`. Expose the registry maximum without adding another 252 sessions.
+  - [x] Do not infer historical relative-strength rank from current data. Pass no rank to VCP V1 and persist relative-strength fields as policy-approved null; adding benchmark evidence later requires a new detector version and input revision.
 
-- [ ] Build deterministic, bounded reconstruction (AC: 1, 3, 6, 7)
-  - [ ] Add `app/services/backtest/historical_scan_reconstruction.py` with an explicit input object containing roster identity, snapshot month, exchange-local as-of session date, exact `StoredHistoricalEvidence`, and revision metadata.
-  - [ ] Construct `HistoricalMarketPlanes.from_evidence(...)` internally and consume only its `split_continuous_as_of(date)` view; do not accept separately supplied planes, read raw provider rows, or use adjusted-close data directly.
-  - [ ] Treat cache `date` as the security's exchange-local `as_of_session_date`; keep `snapshot_month` as a separate record field.
-  - [ ] Exclude warm-up rows from output eligibility and assert all detector-visible rows are `<= as_of_session_date`.
-  - [ ] Produce every detector fragment, assemble them in the fixed registry order, validate the complete `HistoricalScanRecordV1`, and only then return a record.
-  - [ ] Apply the error mapping in Dev Notes. Preserve Story 1.4 `MarketDataPolicyError` codes unchanged and use architecture vocabulary for reconstruction/cache failures; immutable content conflicts are `integrity_error`.
-  - [ ] Ensure reconstruction has no imports from `app/agents`, portfolio/trading/order modules, or live price-cache modules.
+- [x] Build deterministic, bounded reconstruction (AC: 1, 3, 6, 7)
+  - [x] Add `app/services/backtest/historical_scan_reconstruction.py` with an explicit input object containing roster identity, snapshot month, exchange-local as-of session date, exact `StoredHistoricalEvidence`, and revision metadata.
+  - [x] Construct `HistoricalMarketPlanes.from_evidence(...)` internally and consume only its `split_continuous_as_of(date)` view; do not accept separately supplied planes, read raw provider rows, or use adjusted-close data directly.
+  - [x] Treat cache `date` as the security's exchange-local `as_of_session_date`; keep `snapshot_month` as a separate record field.
+  - [x] Exclude warm-up rows from output eligibility and assert all detector-visible rows are `<= as_of_session_date`.
+  - [x] Produce every detector fragment, assemble them in the fixed registry order, validate the complete `HistoricalScanRecordV1`, and only then return a record.
+  - [x] Apply the error mapping in Dev Notes. Preserve Story 1.4 `MarketDataPolicyError` codes unchanged and use architecture vocabulary for reconstruction/cache failures; immutable content conflicts are `integrity_error`.
+  - [x] Ensure reconstruction has no imports from `app/agents`, portfolio/trading/order modules, or live price-cache modules.
 
-- [ ] Fingerprint source and inputs canonically (AC: 5, 8)
-  - [ ] Add `app/services/backtest/source_manifest.py` as the shared detector/strategy source-manifest implementation; reuse existing canonical manifest primitives where appropriate.
-  - [ ] Hash a sorted UTF-8 JSON manifest using POSIX paths and normalized line endings. Use the exact per-detector runtime allowlists in Dev Notes; do not recursively traverse imports. Exclude tests, caches, bytecode, logs, and generated artifacts.
-  - [ ] Define `ReconstructionInputManifestV1`; include security ID, snapshot month, exchange-local target session, exact evidence revision and request interval, market-plane policy version, alias revision, roster digest, calendar dataset digest, record/policy versions, and sorted detector identities/configuration.
-  - [ ] Use the canonical manifest digest as `input_revision`; test that semantically identical reordered inputs hash equally and any material input change hashes differently.
+- [x] Fingerprint source and inputs canonically (AC: 5, 8)
+  - [x] Add `app/services/backtest/source_manifest.py` as the shared detector/strategy source-manifest implementation; reuse existing canonical manifest primitives where appropriate.
+  - [x] Hash a sorted UTF-8 JSON manifest using POSIX paths and normalized line endings. Use the exact per-detector runtime allowlists in Dev Notes; do not recursively traverse imports. Exclude tests, caches, bytecode, logs, and generated artifacts.
+  - [x] Define `ReconstructionInputManifestV1`; include security ID, snapshot month, exchange-local target session, exact evidence revision and request interval, market-plane policy version, alias revision, roster digest, calendar dataset digest, record/policy versions, and sorted detector identities/configuration.
+  - [x] Use the canonical manifest digest as `input_revision`; test that semantically identical reordered inputs hash equally and any material input change hashes differently.
 
-- [ ] Persist immutable per-detector cache fragments (AC: 5, 8)
-  - [ ] Extend `app/repositories/backtest_repo.py` with a detector-cache table whose composite primary key is exactly `(security_id, date, detector, detector_version, input_revision)`.
-  - [ ] Store canonical detector-fragment JSON plus its repository-computed digest. Before insertion the repository parses the closed envelope and verifies all five envelope key fields equal the SQL key. Full records are assembled deterministically from fragments; Story 1.6 owns transactional monthly snapshot persistence.
-  - [ ] Implement compare-and-insert under `BEGIN IMMEDIATE`: insert-or-ignore, read the winner, return it when bytes/digest match, and raise `integrity_error` when they conflict.
-  - [ ] Add SQLite triggers rejecting UPDATE and DELETE, following the repository's existing immutable evidence patterns.
+- [x] Persist immutable per-detector cache fragments (AC: 5, 8)
+  - [x] Extend `app/repositories/backtest_repo.py` with a detector-cache table whose composite primary key is exactly `(security_id, date, detector, detector_version, input_revision)`.
+  - [x] Store canonical detector-fragment JSON plus its repository-computed digest. Before insertion the repository parses the closed envelope and verifies all five envelope key fields equal the SQL key. Full records are assembled deterministically from fragments; Story 1.6 owns transactional monthly snapshot persistence.
+  - [x] Implement compare-and-insert under `BEGIN IMMEDIATE`: insert-or-ignore, read the winner, return it when bytes/digest match, and raise `integrity_error` when they conflict.
+  - [x] Add SQLite triggers rejecting UPDATE and DELETE, following the repository's existing immutable evidence patterns.
 
-- [ ] Verify determinism, isolation, and failure behaviour (AC: 1-8)
-  - [ ] Add fixed-fixture golden tests for complete canonical record bytes/digest, stage classifications, technical outputs, VCP true/false outcomes, null policy, date/units, and provenance warning facts.
-  - [ ] Add tests proving future rows cannot affect earlier results and direct out-of-bounds access fails.
-  - [ ] Add tests for missing/ambiguous evidence, insufficient lookback, null/zero volume distinction, non-finite values, malformed enums, unknown fields, and no partial record on any detector failure.
-  - [ ] Add cache hit/miss, immutable trigger, conflicting-content, process-reopen, and `ThreadPoolExecutor` concurrency tests. Concurrency uses independent SQLite connections, converges on one row, and proves rollback leaves no partial transaction.
-  - [ ] Block/monkeypatch network and subprocess entry points during reconstruction tests and assert they are never called.
-  - [ ] Run focused Backtest/Analyst/Scanner tests, then the complete repository test and quality suite.
+- [x] Verify determinism, isolation, and failure behaviour (AC: 1-8)
+  - [x] Add fixed-fixture golden tests for complete canonical record bytes/digest, stage classifications, technical outputs, VCP true/false outcomes, null policy, date/units, and provenance warning facts.
+  - [x] Add tests proving future rows cannot affect earlier results and direct out-of-bounds access fails.
+  - [x] Add tests for missing/ambiguous evidence, insufficient lookback, null/zero volume distinction, non-finite values, malformed enums, unknown fields, and no partial record on any detector failure.
+  - [x] Add cache hit/miss, immutable trigger, conflicting-content, process-reopen, and `ThreadPoolExecutor` concurrency tests. Concurrency uses independent SQLite connections, converges on one row, and proves rollback leaves no partial transaction.
+  - [x] Block/monkeypatch network and subprocess entry points during reconstruction tests and assert they are never called.
+  - [x] Run focused Backtest/Analyst/Scanner tests, then the complete repository test and quality suite.
+
+### Review Findings
+
+- [x] [Review][Patch] [High] Validate authoritative roster-member, MIC, and yfinance-ingestion provenance directly in Story 1.5 reconstruction inputs [app/services/backtest/historical_scan_reconstruction.py:55]
+- [x] [Review][Patch] [High] Verify every manifest `detector_version` against the locally generated AD-5 source-manifest digest [app/services/backtest/historical_scan_reconstruction.py:279]
+- [x] [Review][Patch] [High] Verify `StoredHistoricalEvidence` content/revision integrity and bind `provider_evidence_manifest_digest` to the evidence actually replayed [app/services/backtest/historical_scan_reconstruction.py:262]
+- [x] [Review][Patch] [High] Validate the exact 252 exchange-calendar sessions and the claimed calendar digest, not only row count and final date [app/services/backtest/historical_scan_reconstruction.py:87]
+- [x] [Review][Patch] [High] Isolate VCP Decimal arithmetic from the process-global Decimal context [skills/vcp-screener/scripts/calculators/volume_pattern_calculator.py:89]
+- [x] [Review][Patch] [High] Reject missing or wrongly typed VCP calculator fields instead of defaulting/coercing them into fabricated valid output [app/services/backtest/detectors.py:281]
+- [x] [Review][Patch] [High] Map unexpected detector adapter exceptions such as malformed contraction `AttributeError` to stable `integrity_error` [app/services/backtest/detectors.py:89]
+- [x] [Review][Patch] [High] Make nested detector configurations, input identities, source manifests, and provenance version maps genuinely immutable [app/services/backtest/historical_scan_record.py:239]
+- [x] [Review][Patch] [Medium] Preserve legacy integer live-volume outputs for integral inputs while retaining fractional reconstruction values [skills/vcp-screener/scripts/calculators/volume_pattern_calculator.py:194]
+- [x] [Review][Patch] [Medium] Enforce canonical record cross-field and semantic invariants, including snapshot month, MIC/currency/unit compatibility, non-negative technicals, and bounded/ordered contraction dates [app/services/backtest/historical_scan_record.py:278]
 
 ## Dev Notes
 
@@ -241,6 +254,54 @@ GPT-5 Codex
 
 ### Debug Log References
 
+- RED: `tests/backtest/test_historical_scan_record.py` initially failed because the contract module did not exist.
+- GREEN: 8 contract tests passed; full regression suite passed with 829 tests.
+- RED/GREEN: shared-core imports initially failed; 70 focused Detector/Scanner/Analyst tests and 834 full-suite tests then passed.
+- RED/GREEN: bounded reconstruction initially had no module; 7 focused reconstruction tests and 841 full-suite tests passed.
+- RED/GREEN: source/input manifest imports initially failed; 14 focused identity/reconstruction tests and 848 full-suite tests passed.
+- RED/GREEN: cache repository symbols initially did not exist; 12 focused repository tests and 853 full-suite tests passed.
+- GREEN: exact cache reuse and concurrent complete reconstruction tests passed after integrating the repository cache into reconstruction.
+- FINAL: 104 focused Backtest/Scanner/Analyst tests and all 860 repository tests passed; touched-file Ruff, formatting, Pyrefly, and `git diff --check` passed.
+- REVIEW GREEN: all 10 adversarial findings were patched; 119 focused Story/Scanner/Analyst tests, all 226 VCP skill tests, and all 875 repository tests passed.
+
+### Implementation Plan
+
+- Build the closed canonical models first, then extract shared calculation cores behind compatibility delegates.
+- Add bounded detector orchestration and canonical source/input identities before persistence.
+- Finish with compare-and-insert cache concurrency, isolation checks, and full repository quality gates.
+
 ### Completion Notes List
 
+- Implemented the strict `HistoricalScanRecordV1`, reconstructability policy, canonical Decimal/UTF-8 serialization, provenance, and detector-fragment contracts.
+- Extracted live-compatible technicals and dependency-neutral Stage logic; registered bounded in-process historical technical, Stage, and VCP detectors with Decimal-capable volume.
+- Added all-or-nothing bounded reconstruction from exact Story 1.4 evidence with stable identity/data failures and fixed-order fragment assembly.
+- Added exact source allowlist hashing and a sorted reconstruction input manifest whose digest is the sole `input_revision` authority.
+- Added immutable per-detector cache persistence with exact-key verification, repository-owned digests, process-reopen reads, and concurrent convergence.
+- Bound each manifest detector API/configuration to the closed runtime registry, preventing a cache identity from describing configuration that was not executed.
+- Verified all acceptance criteria and moved the story to review. Repository-wide Ruff and Pyrefly still report only pre-existing findings outside Story 1.5's touched files.
+- Hardened review boundaries with authoritative roster/ingestion identity, evidence and calendar verification, runtime source-digest binding, strict VCP adapter validation, fixed Decimal context, deep immutability, and canonical semantic invariants.
+- Preserved legacy integral live-volume behavior while retaining fractional reconstructed volume; all review findings are resolved and the story is done.
+
 ### File List
+
+- app/services/backtest/historical_scan_record.py
+- app/services/backtest/historical_scan_reconstruction.py
+- app/services/backtest/source_manifest.py
+- app/repositories/backtest_repo.py
+- app/core/stage_classification.py
+- app/core/technical_indicators.py
+- app/services/backtest/detectors.py
+- app/agents/analyst/analyst_agent.py
+- app/agents/scanner/scanner_agent.py
+- skills/vcp-screener/scripts/calculators/volume_pattern_calculator.py
+- tests/backtest/test_detector_cores.py
+- tests/backtest/fixtures/historical_scan_record_v1.json
+- tests/backtest/test_historical_scan_record.py
+- tests/backtest/test_historical_scan_reconstruction.py
+- tests/backtest/test_source_manifest.py
+- tests/backtest/test_scan_reconstruction_cache.py
+
+### Change Log
+
+- 2026-08-11: Implemented deterministic canonical historical scan reconstruction, source/input fingerprinting, immutable detector-fragment caching, compatibility delegates, and complete isolation/concurrency coverage; moved Story 1.5 to review.
+- 2026-08-11: Applied all BMAD adversarial review patches, completed full regression verification, and moved Story 1.5 to done.
