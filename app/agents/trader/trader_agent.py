@@ -6,6 +6,7 @@ Run as part of the web UI backend.
 """
 
 import csv
+import io
 import logging
 import re
 from datetime import datetime
@@ -560,17 +561,22 @@ class TraderAgent(Agent):
         )
 
     def import_sipp(
-        self, csv_path: str | Path, portfolio_id: int | None = None
+        self, csv_content: bytes, portfolio_id: int | None = None
     ) -> SippImportResult:
         """Import a SIPP CSV into ``portfolio_id``; return counts and problems.
 
-        Validates the header row first (missing required columns abort the
-        import with ``SippImportError`` before any DB write). Unparseable
-        numeric values and skipped trade rows are collected and reported rather
-        than silently swallowed (#152). Idempotency is keyed per-portfolio, so
-        the same CSV imported into two portfolios does not collide (#147).
+        Parses each request's own uploaded bytes exactly once — never a
+        shared filesystem path — so concurrent uploads can never read or
+        overwrite one another's *input CSV* on disk (#210; this does not by
+        itself guarantee DB-level isolation for two concurrent imports into
+        the *same* ``portfolio_id``, which is separate, later-story
+        territory). Validates the header row first
+        (missing required columns abort the import with ``SippImportError``
+        before any DB write). Unparseable numeric values and skipped trade
+        rows are collected and reported rather than silently swallowed
+        (#152). Idempotency is keyed per-portfolio, so the same CSV imported
+        into two portfolios does not collide (#147).
         """
-        csv_path = Path(csv_path)
         parse_errors: list[str] = []
         skipped_rows: list[str] = []
         # Rows with genuinely no signal (no quantity, no debit/credit, no
@@ -616,21 +622,29 @@ class TraderAgent(Agent):
                 return "WITHDRAWAL"
             return "OTHER"
 
-        with open(csv_path, encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            # Some provider exports prepend a run of BOM noise to the very
-            # first header cell (e.g. "﻿...﻿Date" or "ï»¿...ï»¿Date").
-            # ``utf-8-sig`` strips only one real BOM, so the first column key
-            # stays polluted and every ``row.get("Date")`` misses it —
-            # silently blanking the trade date (#166, #171). Normalise the
-            # header names before reading rows so the value lookups use the
-            # clean column names.
-            reader.fieldnames = [
-                _HEADER_BOM_NOISE_RE.sub("", h or "").strip()
-                for h in (reader.fieldnames or [])
-            ]
-            fieldnames = reader.fieldnames
-            rows = list(reader)
+        # The single in-memory transformation this method performs: decode
+        # the caller-owned bytes once, then parse via a StringIO-backed
+        # DictReader. No file path is ever opened, read, or re-read (#210).
+        # ``newline=None`` reproduces the universal-newline translation that
+        # ``open(..., encoding="utf-8-sig")`` (the previous implementation)
+        # applied by default -- without it, a bare ``\r``-terminated CSV
+        # (classic Mac-style line endings, occasionally seen in older
+        # broker exports) raises ``_csv.Error`` instead of parsing cleanly.
+        text = csv_content.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text, newline=None))
+        # Some provider exports prepend a run of BOM noise to the very
+        # first header cell (e.g. "﻿...﻿Date" or "ï»¿...ï»¿Date").
+        # ``utf-8-sig`` strips only one real BOM, so the first column key
+        # stays polluted and every ``row.get("Date")`` misses it —
+        # silently blanking the trade date (#166, #171). Normalise the
+        # header names before reading rows so the value lookups use the
+        # clean column names.
+        reader.fieldnames = [
+            _HEADER_BOM_NOISE_RE.sub("", h or "").strip()
+            for h in (reader.fieldnames or [])
+        ]
+        fieldnames = reader.fieldnames
+        rows = list(reader)
 
         present = set(fieldnames)
         missing = [c for c in REQUIRED_SIPP_COLUMNS if c not in present]

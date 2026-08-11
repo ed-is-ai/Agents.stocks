@@ -7,6 +7,7 @@ from app.agents.trader.trader_agent import (
     TraderAgent,
     _to_iso_date,
 )
+from app.core.config import PORTFOLIO_VALUE_CSV
 
 
 def test_record_multiple_buys(tmp_path: Path) -> None:
@@ -107,8 +108,8 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    agent.import_sipp(csv_path)
-    agent.import_sipp(csv_path)  # re-import must not duplicate
+    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes())  # re-import must not duplicate
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -133,7 +134,7 @@ def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     trades = agent.get_trade_history()
     assert len(trades) == 1
@@ -160,7 +161,7 @@ def test_import_sipp_handles_mojibake_bom_in_first_header(tmp_path: Path) -> Non
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     trades = agent.get_trade_history()
     assert len(trades) == 1
@@ -205,7 +206,7 @@ def test_import_sipp_rolls_back_on_error(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
     assert len(agent.get_portfolio()) == 1
 
 
@@ -224,7 +225,7 @@ def test_replay_orders_by_trade_date_not_file_order(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -248,7 +249,7 @@ def test_replay_correct_with_mixed_date_formats(tmp_path: Path) -> None:
     )
     csv_path = tmp_path / "sipp.csv"
     csv_path.write_text(csv_text, encoding="utf-8")
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -277,7 +278,7 @@ def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     conn = sqlite3.connect(agent.db_path)
     rows = conn.execute(
@@ -313,7 +314,7 @@ def test_sipp_parses_eur_and_usd_amounts(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.parse_errors == []
     assert result.skipped_rows == []
@@ -346,7 +347,7 @@ def test_sipp_imports_dividend_row_that_has_symbol_but_no_quantity(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.buy_count == 0 and result.sell_count == 0
     conn = sqlite3.connect(agent.db_path)
@@ -376,7 +377,7 @@ def test_sipp_issue_detail_falls_back_to_csv_row_when_reference_is_na(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert len(result.parse_errors) == 1
     # Row 1 is the header, so the first data row is CSV row 2.
@@ -399,7 +400,7 @@ def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
     assert result.cash_balance == 500.0
 
 
@@ -420,7 +421,7 @@ def test_sipp_total_rows_and_status_ok_when_every_row_is_accounted_for(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 2
     assert result.buy_count + result.cash_flow_count == result.total_rows
@@ -445,7 +446,7 @@ def test_sipp_unparseable_cash_amount_is_skipped_not_silently_dropped(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 1
     assert result.buy_count == 0
@@ -472,7 +473,7 @@ def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> Non
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 1
     assert result.skipped_rows == []
@@ -521,7 +522,7 @@ def test_sipp_logs_and_skips_malformed_quantity(tmp_path: Path, caplog) -> None:
     agent._init_db()
 
     with caplog.at_level(logging.WARNING):
-        result = agent.import_sipp(csv_path)
+        result = agent.import_sipp(csv_path.read_bytes())
 
     # The malformed AAPL row was skipped (and logged); the valid MSFT row imported.
     portfolio = agent.get_portfolio()
@@ -542,7 +543,7 @@ def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:
     agent._init_db()
 
     with pytest.raises(SippImportError) as exc:
-        agent.import_sipp(csv_path)
+        agent.import_sipp(csv_path.read_bytes())
     assert "Quantity" in str(exc.value)
     assert "Running Balance" in str(exc.value)
     assert agent.get_portfolio() == []
@@ -562,7 +563,7 @@ def test_sipp_reports_parse_errors(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
     assert agent.get_portfolio() == []
     assert any("Price" in e for e in result.parse_errors)
     assert result.buy_count == 0
@@ -584,10 +585,103 @@ def test_sipp_clean_import_reports_counts(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
     assert result.buy_count == 1
     assert result.sell_count == 1
     assert result.cash_flow_count == 1
     assert result.skipped_rows == []
     assert result.parse_errors == []
     assert result.cash_balance == 720.0
+
+
+def test_import_sipp_never_opens_a_file_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC #3 (read once): the importer must parse only the bytes it was
+    given, never re-open a CSV from disk for *reading*. Monkeypatch ``open``
+    to blow up on any ``.csv`` path opened for reading — if ``import_sipp``
+    still succeeds, it never touched the filesystem to read the CSV itself
+    (#210). ``PORTFOLIO_VALUE_CSV`` is explicitly excluded from the guard:
+    ``update_portfolio_snapshot``'s legacy (no-``portfolio_id``) branch may
+    legitimately read/append it, and that behavior is unrelated pre-existing
+    logic this story doesn't change -- excluding it by path (rather than
+    relying on this test's ``cash_balance`` happening to be non-zero, which
+    would otherwise skip that read incidentally) keeps the guard precise
+    regardless of which branch runs.
+    """
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\n"
+    )
+    csv_bytes = csv_text.encode("utf-8")
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()  # unrelated CSV seeding happens here, before the guard
+
+    real_open = open
+
+    def _guarded_open(file, mode="r", *args, **kwargs):  # type: ignore[no-untyped-def]
+        name = str(file)
+        if name.endswith(".csv") and "r" in mode and name != str(PORTFOLIO_VALUE_CSV):
+            raise AssertionError(f"import_sipp must not read a CSV path: {name}")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _guarded_open)
+
+    result = agent.import_sipp(csv_bytes)
+    assert result.buy_count == 1
+
+
+def test_import_sipp_handles_crlf_terminated_csv(tmp_path: Path) -> None:
+    """Regression for the io.StringIO newline nuance: unlike ``open(...,
+    encoding="utf-8-sig")`` with universal-newline translation,
+    ``io.StringIO`` does not translate ``\\r\\n`` -> ``\\n`` by default unless
+    ``newline=None`` is passed explicitly. Built directly as bytes (not via
+    ``Path.write_text``, which would apply platform-default newline
+    translation on write and hide the bug) to prove a CRLF-terminated
+    broker export still parses correctly (#210)."""
+    csv_bytes = (
+        b"Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        b"Running Balance\r\n"
+        b"01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\r\n"
+    )
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_bytes)
+    assert result.buy_count == 1
+    assert result.parse_errors == []
+    assert result.cash_balance == 5000.0
+
+    portfolio = agent.get_portfolio()
+    assert len(portfolio) == 1
+    assert portfolio[0].ticker == "AAPL"
+    assert portfolio[0].shares == 10.0
+
+
+def test_import_sipp_handles_bare_cr_terminated_csv(tmp_path: Path) -> None:
+    """Regression for classic Mac-style line endings (bare ``\\r``, no
+    ``\\n``), occasionally produced by older export tools/spreadsheets.
+    ``io.StringIO`` with the default ``newline='\\n'`` raises
+    ``_csv.Error: new-line character seen in unquoted field`` on this input
+    -- only ``newline=None`` (universal-newline translation, matching the
+    previous ``open(..., encoding="utf-8-sig")`` behavior) parses it
+    correctly (#210)."""
+    csv_bytes = (
+        b"Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        b"Running Balance\r"
+        b"01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\r"
+    )
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_bytes)
+    assert result.buy_count == 1
+    assert result.parse_errors == []
+    assert result.cash_balance == 5000.0

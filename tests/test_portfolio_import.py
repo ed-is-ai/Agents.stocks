@@ -30,7 +30,6 @@ def mocked_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         "app.api.routes.portfolio.templates.TemplateResponse",
         lambda *a, **k: HTMLResponse("ok", status_code=k.get("status_code", 200)),
     )
-    monkeypatch.setattr("app.api.routes.portfolio.SIPP_IMPORT_DIR", tmp_path / "SIPP")
     monkeypatch.setattr(
         "app.api.routes.portfolio.IMPORTED_FILES_DIR", tmp_path / "imported"
     )
@@ -64,24 +63,24 @@ def _upload(filename: str = "merged.csv", content: bytes = _CSV, token: str = "s
     )
 
 
-def test_happy_path_imports_and_saves(mocked_import):
+def test_happy_path_passes_uploaded_bytes_directly(mocked_import):
     mock_trader, _, _, tmp_path = mocked_import
     resp = _upload()
 
     assert resp.status_code == 200
-    # import_sipp called once with the saved CSV path
+    # import_sipp is called once with the raw uploaded bytes, not a saved
+    # path — no shared filesystem location is written or read (#210).
     mock_trader.import_sipp.assert_called_once()
-    saved_path = Path(mock_trader.import_sipp.call_args.args[0])
-    assert saved_path == tmp_path / "SIPP" / "merged.csv"
-    # the uploaded bytes were persisted
-    assert saved_path.read_bytes() == _CSV
+    assert mock_trader.import_sipp.call_args.args[0] == _CSV
+    assert not (tmp_path / "SIPP").exists()
     mock_trader.get_portfolio.assert_called_once()
 
 
 def test_happy_path_archives_a_copy_of_the_uploaded_file(mocked_import):
     """A successful import must leave a permanent, timestamped copy under
-    data/imported/ — unlike data/processed/SIPP/merged.csv, which the next
-    upload overwrites."""
+    data/imported/ — the only on-disk trace of the upload, since the CSV is
+    parsed directly from its own request-owned bytes rather than a shared
+    working copy (#210)."""
     _, _, _, tmp_path = mocked_import
     resp = _upload(filename="q1_2024.csv")
 
@@ -309,3 +308,12 @@ def test_forbidden_without_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
     resp = client.post("/import-sipp", files={"file": ("merged.csv", _CSV, "text/csv")})
     assert resp.status_code == 403
+
+
+def test_route_module_no_longer_imports_sipp_import_dir():
+    """AC #2, import-graph level: the retired shared path constant must not
+    even be reachable from the route module, not just unused this run
+    (#210)."""
+    import app.api.routes.portfolio as portfolio_route
+
+    assert not hasattr(portfolio_route, "SIPP_IMPORT_DIR")
