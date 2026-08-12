@@ -85,6 +85,35 @@ def test_trades_idempotency_keys_are_scoped_per_portfolio(trades_connect):
     assert repo.idempotency_keys_for_portfolio(None) == set()
 
 
+def test_trades_currency_defaults_to_gbp_and_persists(trades_connect):
+    """Story 1.4, AC1: a trade's source currency is stored, not assumed."""
+    repo = TradesRepository(trades_connect)
+    gbp_id = repo.insert("AAPL", "BUY", 10, 100.0, "01/02/2024")
+    usd_id = repo.insert("MSFT", "BUY", 5, 200.0, "02/02/2024", currency="USD")
+    history = {t.id: t for t in repo.history()}
+    assert history[gbp_id].currency == "GBP"
+    assert history[usd_id].currency == "USD"
+
+
+def test_trades_insert_ignore_threads_currency(trades_connect):
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn,
+            "TSLA",
+            "BUY",
+            2,
+            300.0,
+            "01/02/2024",
+            "",
+            "REF-HKD",
+            None,
+            "key-hkd",
+            "HKD",
+        )
+    assert repo.history()[0].currency == "HKD"
+
+
 def test_trades_set_ack_writes_and_clears(trades_connect):
     """Story 1.5, AC #7: ``set_ack`` writes/clears ``realised_pnl_ack_at``,
     and only the targeted row is affected (an untouched trade stays
@@ -126,6 +155,28 @@ def test_cash_flows_insert_ignore_dedupes(trades_connect):
     assert repo.idempotency_keys_for_portfolio(None) == {"key-1"}
 
 
+def test_cash_flows_currency_defaults_to_gbp_and_persists(trades_connect):
+    """Story 1.4, AC1: a cash flow's source currency is stored, not assumed."""
+    repo = CashFlowsRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(conn, "01/02/2024", "DIVIDEND", None, 12.5, "Div", "R1")
+        repo.insert_ignore(
+            conn,
+            "01/02/2024",
+            "DIVIDEND",
+            None,
+            9.5,
+            "Div EUR",
+            "R2",
+            None,
+            "key-eur",
+            "EUR",
+        )
+    flows = {f.reference: f for f in repo.history()}
+    assert flows["R1"].currency == "GBP"
+    assert flows["R2"].currency == "EUR"
+
+
 def test_cash_flows_history_scopes_and_orders(trades_connect):
     repo = CashFlowsRepository(trades_connect)
     with db.session(trades_connect) as conn:
@@ -140,6 +191,74 @@ def test_cash_flows_history_scopes_and_orders(trades_connect):
     assert flows[0].flow_type == "CONTRIBUTION"
     # Portfolio 2 sees only its own row.
     assert [f.reference for f in repo.history(portfolio_id=2)] == ["R3"]
+
+
+# --- CashBalancesRepository (Story 1.4) -------------------------------------
+
+
+def test_cash_balances_upsert_and_get_round_trip(trades_connect):
+    """Story 1.4, AC1/AC2: per-(portfolio, currency) balances are Decimal,
+    never float — the table exists purely to carry this correctly."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    repo = CashBalancesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.upsert_on_connection(conn, 1, "USD", Decimal("154.86"), "2024-05-29")
+    assert repo.get(1, "USD") == (Decimal("154.86"), "2024-05-29")
+    assert repo.get(1, "GBP") is None
+    assert repo.get(2, "USD") is None
+
+
+def test_cash_balances_upsert_replaces_existing_row(trades_connect):
+    """A later upsert for the same (portfolio, currency) overwrites the
+    stored amount/as_of rather than erroring or duplicating (PRIMARY KEY on
+    (portfolio_id, currency))."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    repo = CashBalancesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.upsert_on_connection(conn, 1, "USD", Decimal("100.00"), "2024-01-01")
+        repo.upsert_on_connection(conn, 1, "USD", Decimal("200.00"), "2024-02-01")
+    assert repo.get(1, "USD") == (Decimal("200.00"), "2024-02-01")
+
+
+def test_cash_balances_get_on_connection_sees_uncommitted_writes(trades_connect):
+    """Story 1.2's #160 stale-date guard reads via the same open connection
+    as the write, inside the SIPP import's one transaction — so a read must
+    see this transaction's own not-yet-committed upsert."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    repo = CashBalancesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.upsert_on_connection(conn, 1, "EUR", Decimal("50.00"), "2024-03-01")
+        assert repo.get_on_connection(conn, 1, "EUR") == (
+            Decimal("50.00"),
+            "2024-03-01",
+        )
+        assert repo.get_on_connection(conn, 1, "GBP") is None
+
+
+def test_cash_balances_scoped_per_portfolio_and_currency(trades_connect):
+    """A EUR balance and a GBP balance for the same portfolio, and the same
+    currency across two portfolios, are independent rows."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    repo = CashBalancesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.upsert_on_connection(conn, 1, "GBP", Decimal("10.00"), "2024-01-01")
+        repo.upsert_on_connection(conn, 1, "EUR", Decimal("20.00"), "2024-01-01")
+        repo.upsert_on_connection(conn, 2, "GBP", Decimal("30.00"), "2024-01-01")
+    assert repo.get(1, "GBP") == (Decimal("10.00"), "2024-01-01")
+    assert repo.get(1, "EUR") == (Decimal("20.00"), "2024-01-01")
+    assert repo.get(2, "GBP") == (Decimal("30.00"), "2024-01-01")
 
 
 # --- PriceCacheRepository --------------------------------------------------

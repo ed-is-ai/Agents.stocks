@@ -91,6 +91,7 @@ class CashFlow(BaseModel):
     description: str | None = None
     reference: str | None = None
     portfolio_id: int | None = None
+    currency: str = "GBP"  # source currency recorded on the SIPP row (#210)
 
 
 class ExitSignal(BaseModel):
@@ -122,6 +123,7 @@ class Trade(BaseModel):
     entry_price: float | None = None  # analyst pivot entry price
     portfolio_id: int | None = None  # owning account (#147)
     realised_pnl_ack_at: str | None = None  # unmatched-sell ack timestamp (#170)
+    currency: str = "GBP"  # source currency recorded on the SIPP row (#210)
 
 
 class Position(BaseModel):

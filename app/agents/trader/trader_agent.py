@@ -11,6 +11,7 @@ import io
 import logging
 import re
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +19,12 @@ from pydantic import PrivateAttr
 
 from app.agents.base import Agent
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
+from app.core.money import Money, MoneyParseError, has_currency_marker, parse_money
 from app.schemas import CashFlow, Position, SippImportResult, Trade
 from app.repositories import db
 from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
+from app.repositories.cash_balances_repo import CashBalancesRepository
 from app.repositories.cash_flows_repo import CashFlowsRepository
 from app.repositories.db import Connect
 from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
@@ -107,6 +110,7 @@ class TraderAgent(Agent):
 
     _trades: TradesRepository = PrivateAttr()
     _cash_flows: CashFlowsRepository = PrivateAttr()
+    _cash_balances: CashBalancesRepository = PrivateAttr()
     _price_cache: PriceCacheRepository = PrivateAttr()
     _account: AccountStateRepository = PrivateAttr()
     _artifacts: ArtifactsRepository = PrivateAttr()
@@ -118,6 +122,7 @@ class TraderAgent(Agent):
         connect: Connect = db.make_connect(lambda: self.db_path)
         self._trades = TradesRepository(connect)
         self._cash_flows = CashFlowsRepository(connect)
+        self._cash_balances = CashBalancesRepository(connect)
         self._price_cache = PriceCacheRepository(connect)
         self._account = AccountStateRepository(connect)
         self._artifacts = ArtifactsRepository()
@@ -606,12 +611,17 @@ class TraderAgent(Agent):
         the *same* ``portfolio_id``, which is separate, later-story
         territory). Validates the header row first
         (missing required columns abort the import with ``SippImportError``
-        before any DB write). Unparseable numeric values are surfaced in
-        ``parse_errors`` rather than silently swallowed (#152). Idempotency
-        is keyed on ``(portfolio_id, idempotency_key)`` — a hash of the row's
-        own content, not its provider Reference — so overlapping quarterly
-        exports dedupe deterministically and the same CSV imported into two
-        portfolios does not collide (#147).
+        before any DB write). Every monetary cell is parsed into a
+        currency-preserving ``Money`` (Story 1.4); ambiguous, unsupported,
+        malformed-locale, or contradictory currency evidence rejects its
+        row via ``failed_rows`` rather than silently defaulting to GBP or
+        ``0.0`` (AC3) — ``parse_errors`` is kept only for API compatibility
+        and stays empty for money fields now that every such failure is a
+        ``failed`` outcome. Idempotency is keyed on ``(portfolio_id,
+        idempotency_key)`` — a hash of the row's own content, not its
+        provider Reference — so overlapping quarterly exports dedupe
+        deterministically and the same CSV imported into two portfolios
+        does not collide (#147).
 
         Every row is first evaluated into an in-memory plan with no database
         writes. Only if every row is safe to write (none resolve to
@@ -620,12 +630,7 @@ class TraderAgent(Agent):
         snapshot together. If any row is ``failed``, the whole plan is
         rejected and nothing is persisted — see ``failed_rows`` and
         ``status="rejected"`` on the returned result (#210's atomic-commit
-        follow-up). ``parse_errors`` and ``failed_rows`` are independent and
-        may both be non-empty on a rejected result: a value can fail to
-        parse (recorded in ``parse_errors``) without its row necessarily
-        being ``failed`` (e.g. it defaults to 0 and the row is a benign
-        no-op), and a row can be ``failed`` for a reason unrelated to any
-        parse error (e.g. a well-formed but non-positive price).
+        follow-up).
 
         Every row resolves to exactly one of ``inserted``/``duplicate``/
         ``skipped``/``failed``, and the returned counts say which. For a
@@ -650,25 +655,30 @@ class TraderAgent(Agent):
         # since nothing actually went wrong (#187).
         benign_empty_count = 0
 
-        def clean_amount(s: str | None, field: str = "", ref: str = "") -> float:
+        def parse_field_money(
+            s: str | None, field: str = "", ref: str = ""
+        ) -> tuple[Money | None, bool]:
+            """Parse one CSV cell into ``(Money, marker_present)``.
+
+            Returns ``(None, False)`` for a blank/``"n/a"`` cell (a no-op,
+            matching ``clean_amount``'s existing behaviour exactly) or for a
+            cell that failed to parse -- in the failure case, a row-cannot-
+            proceed entry is appended to ``failed_rows`` here rather than
+            falling back to a silently-guessed ``0.0`` (AC3).
+            """
             if not s or s.strip() in ("", "n/a"):
-                return 0.0
-            cleaned = (
-                s.replace("﻿", "")
-                .replace("£", "")
-                .replace("€", "")
-                .replace("$", "")
-                .replace(",", "")
-                .replace('"', "")
-                .strip()
-            )
+                return None, False
             try:
-                return float(cleaned)
-            except ValueError:
-                parse_errors.append(
-                    f"row {ref or '?'}: unparseable {field or 'amount'} {s.strip()!r}"
+                # No ``ref=`` passed: ``parse_money``'s own error messages
+                # should show the actual malformed cell text, not the row
+                # label -- the row label is prepended separately below.
+                money = parse_money(s, default_currency="GBP")
+            except MoneyParseError as exc:
+                failed_rows.append(
+                    f"row {ref or '?'}: {field or 'amount'} {exc.code}: {exc.detail}"
                 )
-                return 0.0
+                return None, False
+            return money, has_currency_marker(s)
 
         def classify_flow_type(description: str) -> str:
             d = description.lower()
@@ -717,7 +727,7 @@ class TraderAgent(Agent):
                 "CSV is missing required columns: " + ", ".join(missing)
             )
 
-        buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
+        buy_count, sell_count, cash_count = 0, 0, 0
         inserted_count = duplicate_count = 0
         # A rejected plan never opens a write connection, so its per-row
         # inserted/duplicate outcomes can only come from a read-only
@@ -743,11 +753,15 @@ class TraderAgent(Agent):
         # The authoritative cash balance is the running balance of the
         # latest-dated row, chosen independently of the CSV's row order so a
         # newest-first export yields the same balance as an oldest-first one
-        # (#158). Rank = (has-ISO-date, iso-date, file-index): an ISO-dated row
-        # always beats an unparseable-date row, later dates win, and ties fall
-        # to the last such row in the file. With no parseable dates this
-        # degrades to the previous last-row-in-file behaviour.
-        cash_balance_rank: tuple[int, str, int] | None = None
+        # (#158), tracked per currency (Story 1.4) so a EUR Running Balance
+        # row and a GBP Running Balance row never compete against each
+        # other's rank. Rank = (has-ISO-date, iso-date, file-index): an
+        # ISO-dated row always beats an unparseable-date row, later dates
+        # win, and ties fall to the last such row in the file. With no
+        # parseable dates this degrades to the previous last-row-in-file
+        # behaviour.
+        cash_balance_rank: dict[str, tuple[int, str, int]] = {}
+        cash_balance: dict[str, Decimal] = {}
 
         for idx, row in enumerate(rows):
             qty = row.get("Quantity", "").strip()
@@ -773,20 +787,29 @@ class TraderAgent(Agent):
             # point at a specific row instead of a useless "row n/a" for
             # every such row (#185).
             row_label = reference if reference else f"CSV row {idx + 2}"
-            _parse_errors_before = len(parse_errors)
-            debit = clean_amount(row.get("Debit", ""), "Debit", row_label)
-            credit = clean_amount(row.get("Credit", ""), "Credit", row_label)
-            # Scoped to just Debit/Credit (not Price, which is irrelevant
-            # to a non-trade row) so a cash-flow-shaped row whose amount
-            # failed to parse -- and therefore defaulted to 0.0 and would
-            # otherwise vanish with no action taken and no skip entry --
-            # gets flagged below instead of silently dropped (#187).
-            amount_had_parse_error = len(parse_errors) > _parse_errors_before
-            price = clean_amount(row.get("Price", ""), "Price", row_label)
+            debit_money, debit_marker = parse_field_money(
+                row.get("Debit", ""), "Debit", row_label
+            )
+            credit_money, credit_marker = parse_field_money(
+                row.get("Credit", ""), "Credit", row_label
+            )
+            rb_money, rb_marker = parse_field_money(
+                row.get("Running Balance", ""), "Running Balance", row_label
+            )
+            debit = debit_money.amount if debit_money else Decimal("0")
+            credit = credit_money.amount if credit_money else Decimal("0")
             date = _to_iso_date(row.get("Date", "").strip())
             sedol = row.get("Sedol", "").strip()
             description = row.get("Description", "").strip()
             idempotency_key = _idempotency_key(date, symbol, sedol, qty, description)
+
+            # Price is only monetary evidence on a trade row -- a non-trade
+            # row's Price cell can carry an unrelated numeric shape (e.g. a
+            # 5dp GBP/USD FX rate on a housekeeping row) that this method
+            # never reads, so it must not be run through strict Money
+            # parsing at all (Gate 4; grounded in real production data).
+            price_money: Money | None = None
+            price_marker = False
 
             if qty and qty != "n/a":
                 # Trade if Symbol is valid or if HSBC GLOB
@@ -811,6 +834,10 @@ class TraderAgent(Agent):
                         shares = None
 
                     if shares is not None:
+                        price_money, price_marker = parse_field_money(
+                            row.get("Price", ""), "Price", row_label
+                        )
+                        price = price_money.amount if price_money else Decimal("0")
                         if shares <= 0 or price <= 0:
                             failed_rows.append(
                                 f"row {row_label}: non-positive "
@@ -827,12 +854,13 @@ class TraderAgent(Agent):
                                         ticker,
                                         action,
                                         shares,
-                                        price,
+                                        float(price),
                                         date,
                                         "",
                                         reference or None,
                                         portfolio_id,
                                         idempotency_key,
+                                        price_money.currency if price_money else "GBP",
                                     )
                                 )
                                 classify(idempotency_key, existing_trade_keys)
@@ -842,6 +870,7 @@ class TraderAgent(Agent):
                                     "debit/credit amount"
                                 )
                 else:
+                    amount_money = credit_money if credit > 0 else debit_money
                     amount = credit if credit > 0 else debit
                     if amount > 0:
                         flow_type = classify_flow_type(description)
@@ -850,18 +879,15 @@ class TraderAgent(Agent):
                                 date,
                                 flow_type,
                                 None,
-                                amount,
+                                float(amount),
                                 description,
                                 reference,
                                 portfolio_id,
                                 idempotency_key,
+                                amount_money.currency if amount_money else "GBP",
                             )
                         )
                         classify(idempotency_key, existing_cash_flow_keys)
-                    elif amount_had_parse_error:
-                        failed_rows.append(
-                            f"row {row_label}: unparseable cash amount, row skipped"
-                        )
                     else:
                         benign_empty_count += 1
             else:
@@ -875,6 +901,7 @@ class TraderAgent(Agent):
                 # (#186). Fall through to the same cash-flow handling as
                 # a blank-Symbol row; a genuine no-amount/no-signal row
                 # still does nothing below.
+                amount_money = credit_money if credit > 0 else debit_money
                 amount = credit if credit > 0 else debit
                 if amount > 0:
                     flow_type = classify_flow_type(description)
@@ -883,30 +910,47 @@ class TraderAgent(Agent):
                             date,
                             flow_type,
                             None,
-                            amount,
+                            float(amount),
                             description,
                             reference,
                             portfolio_id,
                             idempotency_key,
+                            amount_money.currency if amount_money else "GBP",
                         )
                     )
                     classify(idempotency_key, existing_cash_flow_keys)
-                elif amount_had_parse_error:
-                    failed_rows.append(
-                        f"row {row_label}: unparseable cash amount, row skipped"
-                    )
                 else:
                     benign_empty_count += 1
 
-            running_balance = row.get("Running Balance", "").strip()
-            if running_balance and running_balance != "n/a":
-                rb = clean_amount(running_balance, "Running Balance", row_label)
-                if rb > 0:
-                    is_iso = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date))
-                    rank = (1 if is_iso else 0, date if is_iso else "", idx)
-                    if cash_balance_rank is None or rank > cash_balance_rank:
-                        cash_balance_rank = rank
-                        cash_balance = rb
+            # Row-level contradictory-currency cross-check (AC3): among the
+            # fields that resolved from an *explicit* marker (a marker-less
+            # field that silently defaulted never contradicts anything),
+            # more than one distinct currency means this row's monetary
+            # evidence disagrees with itself.
+            marker_currencies = {
+                money.currency
+                for money, marker in (
+                    (debit_money, debit_marker),
+                    (credit_money, credit_marker),
+                    (rb_money, rb_marker),
+                    (price_money, price_marker),
+                )
+                if money is not None and marker
+            }
+            if len(marker_currencies) > 1:
+                failed_rows.append(
+                    f"row {row_label}: contradictory currency evidence "
+                    f"({sorted(marker_currencies)})"
+                )
+
+            if rb_money is not None and rb_money.amount > 0:
+                rb_currency = rb_money.currency
+                is_iso = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date))
+                rank = (1 if is_iso else 0, date if is_iso else "", idx)
+                existing_rank = cash_balance_rank.get(rb_currency)
+                if existing_rank is None or rank > existing_rank:
+                    cash_balance_rank[rb_currency] = rank
+                    cash_balance[rb_currency] = rb_money.amount
 
         total_rows = len(rows)
 
@@ -974,16 +1018,27 @@ class TraderAgent(Agent):
                 inserted_count += 1
                 cash_count += 1
 
-            if cash_balance > 0:
-                # The winning row's date (its ISO date, or None if
-                # unparseable).
+            # Every currency with a winning Running Balance row joins the
+            # new per-currency cash_balances table (AD-24), each guarded by
+            # the #160 stale-date check independently.
+            self._apply_import_cash_balances(
+                conn, portfolio_id, cash_balance, cash_balance_rank
+            )
+
+            # The legacy account_state cash_balance:{pid} mechanism (and
+            # SippImportResult.cash_balance) stays scoped to GBP only,
+            # exactly matching today's single-value behaviour when no
+            # non-GBP markers are present in a file -- reads elsewhere are
+            # not migrated onto cash_balances by this story.
+            gbp_balance = cash_balance.get("GBP")
+            gbp_candidate = float(gbp_balance) if gbp_balance is not None else 0.0
+            if gbp_balance is not None and gbp_balance > 0:
+                gbp_rank = cash_balance_rank.get("GBP")
                 cash_asof = (
-                    cash_balance_rank[1]
-                    if cash_balance_rank is not None and cash_balance_rank[0] == 1
-                    else None
+                    gbp_rank[1] if gbp_rank is not None and gbp_rank[0] == 1 else None
                 )
                 self._apply_import_cash_balance(
-                    conn, portfolio_id, cash_balance, cash_asof
+                    conn, portfolio_id, gbp_candidate, cash_asof
                 )
 
             # Read the balance that is actually committed -- never this
@@ -992,7 +1047,7 @@ class TraderAgent(Agent):
             # connection so it sees this import's own write, and reuse the
             # value below rather than re-reading on a second connection.
             effective_cash_balance = self._effective_cash_balance(
-                conn, portfolio_id, cash_balance
+                conn, portfolio_id, gbp_candidate
             )
             if portfolio_id is not None:
                 self._write_import_snapshot(
@@ -1036,7 +1091,7 @@ class TraderAgent(Agent):
             # report -- printing this file's own candidate here would show a
             # number that was rejected as stale and appears nowhere else.
             f"Cash balance: GBP {effective_cash_balance:,.2f} "
-            f"(this file's candidate: GBP {cash_balance:,.2f})"
+            f"(this file's GBP candidate: GBP {gbp_candidate:,.2f})"
         )
         return SippImportResult(
             cash_balance=effective_cash_balance,
@@ -1157,6 +1212,29 @@ class TraderAgent(Agent):
             if as_of is not None:
                 self._account.set_on_connection(
                     conn, self._cash_date_key(portfolio_id), as_of
+                )
+
+    def _apply_import_cash_balances(
+        self,
+        conn: Any,
+        portfolio_id: int | None,
+        cash_balance: dict[str, Decimal],
+        cash_balance_rank: dict[str, tuple[int, str, int]],
+    ) -> None:
+        """Persist each currency's winning Running Balance to
+        ``cash_balances``, applying the #160 stale-date guard independently
+        per currency (AD-24: "per-currency balance state" joins the same
+        one-transaction commit as the import's trade/cash-flow writes).
+        Writes on the caller's open connection; does not commit.
+        """
+        for currency, amount in cash_balance.items():
+            rank = cash_balance_rank[currency]
+            as_of = rank[1] if rank[0] == 1 else None
+            stored = self._cash_balances.get_on_connection(conn, portfolio_id, currency)
+            stored_date = stored[1] if stored else None
+            if as_of is None or stored_date is None or as_of >= stored_date:
+                self._cash_balances.upsert_on_connection(
+                    conn, portfolio_id, currency, amount, as_of
                 )
 
     def _write_import_snapshot(

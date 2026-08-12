@@ -277,6 +277,44 @@ def test_rejected_plan_returns_400_and_never_reads_the_portfolio(
     assert "REF-BAD" in kwargs["body"]
 
 
+def test_currency_rejected_plan_returns_400_with_issue_detail_rendered(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Story 1.4, AC3: a currency validation failure (ambiguous/unsupported/
+    malformed-locale/contradictory) is a ``failed`` outcome in the same
+    FR-13/AD-25 vocabulary Story 1.2 already wires through this route -- no
+    new route logic is needed, only that a currency-shaped ``failed_rows``
+    entry renders via the existing ``_describe_issues`` helper exactly like
+    any other failure reason."""
+    mock_trader, _, mock_notifications, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=0.0,
+        buy_count=0,
+        sell_count=0,
+        cash_flow_count=0,
+        failed_rows=[
+            "row REF-FX: Debit unsupported_currency: unsupported currency in '¥123'"
+        ],
+        total_rows=1,
+        status="rejected",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload()
+
+    assert resp.status_code == 400
+    mock_trader.get_portfolio.assert_not_called()
+    assert "REF-FX" in calls[-1]["error_message"]
+    assert "unsupported_currency" in calls[-1]["error_message"]
+    mock_notifications.record.assert_called_once()
+
+
 def test_missing_columns_returns_400(mocked_import):
     from app.agents.trader.trader_agent import SippImportError
 
