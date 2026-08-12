@@ -226,6 +226,12 @@ async def import_sipp(
         f"{result.cash_flow_count} cash transaction(s); {len(positions)} open "
         f"position(s); cash balance £{result.cash_balance:,.2f}."
     )
+    if result.duplicate_count:
+        message += f" {result.duplicate_count} duplicate(s) already imported."
+    if result.skipped_count:
+        message += f" {result.skipped_count} row(s) skipped."
+    if result.failed_rows:
+        message += f" {len(result.failed_rows)} row(s) failed."
     warnings = []
     if result.skipped_rows:
         warnings.append(_describe_issues("row(s) skipped", result.skipped_rows))
@@ -233,7 +239,14 @@ async def import_sipp(
         warnings.append(_describe_issues("value(s) unparseable", result.parse_errors))
     if warnings:
         message += " Note: " + " | ".join(warnings) + "."
-    if result.status == "error":
+    if result.status == "rejected":
+        message = (
+            f"{result.inserted_count} row(s) would have inserted, "
+            f"{result.duplicate_count} would have been duplicates, "
+            f"{result.skipped_count} skipped — nothing was saved because "
+            f"{len(result.failed_rows)} row(s) failed."
+        )
+    elif result.status == "error":
         # buy/sell/cash/skipped counts didn't add up to total_rows — some
         # row was silently unaccounted for (#187). Distinct from an ordinary
         # data-quality warning: this points at a bug in the import, so it's
@@ -255,7 +268,10 @@ async def import_sipp(
     context["import_buy_count"] = result.buy_count
     context["import_sell_count"] = result.sell_count
     context["import_cash_count"] = result.cash_flow_count
-    context["import_skipped_count"] = len(result.skipped_rows)
+    context["import_inserted_count"] = result.inserted_count
+    context["import_duplicate_count"] = result.duplicate_count
+    context["import_failed_count"] = len(result.failed_rows)
+    context["import_skipped_count"] = result.skipped_count
     context["import_status"] = result.status
     logger.info(
         "SIPP import: %d buys, %d sells, %d cash flows, %d skipped, "

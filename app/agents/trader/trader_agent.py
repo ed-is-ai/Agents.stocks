@@ -581,6 +581,7 @@ class TraderAgent(Agent):
         csv_path = Path(csv_path)
         parse_errors: list[str] = []
         skipped_rows: list[str] = []
+        failed_rows: list[str] = []
         # Rows with genuinely no signal (no quantity, no debit/credit, no
         # parse error) -- counted toward the row-count reconciliation below
         # so a benign informational row never falsely flags status="error",
@@ -649,6 +650,12 @@ class TraderAgent(Agent):
 
         conn = self._conn()
         buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
+        inserted_count = duplicate_count = 0
+        provisional_inserted_count = provisional_duplicate_count = 0
+        existing_trade_keys = self._trades.idempotency_keys_for_portfolio(portfolio_id)
+        existing_cash_flow_keys = self._cash_flows.idempotency_keys_for_portfolio(
+            portfolio_id
+        )
         # The authoritative cash balance is the running balance of the
         # latest-dated row, chosen independently of the CSV's row order so a
         # newest-first export yields the same balance as an oldest-first one
@@ -709,7 +716,7 @@ class TraderAgent(Agent):
                         try:
                             shares = float(qty.replace("£", "").replace(",", ""))
                         except ValueError:
-                            skipped_rows.append(
+                            failed_rows.append(
                                 f"row {row_label}: unparseable quantity {qty!r}"
                             )
                             logger.warning(
@@ -721,7 +728,7 @@ class TraderAgent(Agent):
 
                         if shares is not None:
                             if shares <= 0 or price <= 0:
-                                skipped_rows.append(
+                                failed_rows.append(
                                     f"row {row_label}: non-positive "
                                     f"shares/price ({shares}, {price})"
                                 )
@@ -735,7 +742,12 @@ class TraderAgent(Agent):
                                 )
                                 if action:
                                     ticker = symbol.upper() if is_trade else "HSFWA"
-                                    self._trades.insert_ignore(
+                                    if idempotency_key in existing_trade_keys:
+                                        provisional_duplicate_count += 1
+                                    else:
+                                        provisional_inserted_count += 1
+                                        existing_trade_keys.add(idempotency_key)
+                                    outcome = self._trades.insert_ignore(
                                         conn,
                                         ticker,
                                         action,
@@ -747,12 +759,16 @@ class TraderAgent(Agent):
                                         portfolio_id,
                                         idempotency_key,
                                     )
-                                    if action == "BUY":
-                                        buy_count += 1
+                                    if outcome == "inserted":
+                                        inserted_count += 1
+                                        if action == "BUY":
+                                            buy_count += 1
+                                        else:
+                                            sell_count += 1
                                     else:
-                                        sell_count += 1
+                                        duplicate_count += 1
                                 else:
-                                    skipped_rows.append(
+                                    failed_rows.append(
                                         f"row {row_label}: trade with no "
                                         "debit/credit amount"
                                     )
@@ -760,7 +776,12 @@ class TraderAgent(Agent):
                         amount = credit if credit > 0 else debit
                         if amount > 0:
                             flow_type = classify_flow_type(description)
-                            self._cash_flows.insert_ignore(
+                            if idempotency_key in existing_cash_flow_keys:
+                                provisional_duplicate_count += 1
+                            else:
+                                provisional_inserted_count += 1
+                                existing_cash_flow_keys.add(idempotency_key)
+                            outcome = self._cash_flows.insert_ignore(
                                 conn,
                                 date,
                                 flow_type,
@@ -771,9 +792,13 @@ class TraderAgent(Agent):
                                 portfolio_id,
                                 idempotency_key,
                             )
-                            cash_count += 1
+                            if outcome == "inserted":
+                                inserted_count += 1
+                                cash_count += 1
+                            else:
+                                duplicate_count += 1
                         elif amount_had_parse_error:
-                            skipped_rows.append(
+                            failed_rows.append(
                                 f"row {row_label}: unparseable cash amount, row skipped"
                             )
                         else:
@@ -792,7 +817,12 @@ class TraderAgent(Agent):
                     amount = credit if credit > 0 else debit
                     if amount > 0:
                         flow_type = classify_flow_type(description)
-                        self._cash_flows.insert_ignore(
+                        if idempotency_key in existing_cash_flow_keys:
+                            provisional_duplicate_count += 1
+                        else:
+                            provisional_inserted_count += 1
+                            existing_cash_flow_keys.add(idempotency_key)
+                        outcome = self._cash_flows.insert_ignore(
                             conn,
                             date,
                             flow_type,
@@ -803,9 +833,13 @@ class TraderAgent(Agent):
                             portfolio_id,
                             idempotency_key,
                         )
-                        cash_count += 1
+                        if outcome == "inserted":
+                            inserted_count += 1
+                            cash_count += 1
+                        else:
+                            duplicate_count += 1
                     elif amount_had_parse_error:
-                        skipped_rows.append(
+                        failed_rows.append(
                             f"row {row_label}: unparseable cash amount, row skipped"
                         )
                     else:
@@ -821,14 +855,21 @@ class TraderAgent(Agent):
                             cash_balance_rank = rank
                             cash_balance = rb
 
-            conn.commit()
+            if failed_rows:
+                conn.rollback()
+            else:
+                conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
 
-        if cash_balance > 0:
+        if failed_rows:
+            inserted_count = provisional_inserted_count
+            duplicate_count = provisional_duplicate_count
+            buy_count = sell_count = cash_count = 0
+        if not failed_rows and cash_balance > 0:
             # The winning row's date (its ISO date, or None if unparseable).
             cash_asof = (
                 cash_balance_rank[1]
@@ -836,22 +877,20 @@ class TraderAgent(Agent):
                 else None
             )
             self._apply_import_cash_balance(portfolio_id, cash_balance, cash_asof)
-        self.update_portfolio_snapshot(cash_balance, portfolio_id)
+        if not failed_rows:
+            self.update_portfolio_snapshot(cash_balance, portfolio_id)
 
         # Every data row must land in exactly one bucket -- a mismatch means
         # some row was silently unaccounted for (a bug), not just a
         # data-quality issue, so it's flagged distinctly from an ordinary
         # skipped-row warning (#187).
         total_rows = len(rows)
-        total_actions = (
-            buy_count + sell_count + cash_count + len(skipped_rows) + benign_empty_count
-        )
-        status = "ok" if total_actions == total_rows else "error"
+        status = "rejected" if failed_rows else "ok"
 
         print(
             f"SIPP import complete: {buy_count} BUY, {sell_count} SELL, "
-            f"{cash_count} cash flows, {len(skipped_rows)} skipped, "
-            f"{len(parse_errors)} parse errors, status={status}. "
+            f"{cash_count} cash flows, {benign_empty_count} skipped, "
+            f"{len(failed_rows)} failed, status={status}. "
             f"Cash balance: GBP {cash_balance:,.2f}"
         )
         return SippImportResult(
@@ -860,6 +899,10 @@ class TraderAgent(Agent):
             sell_count=sell_count,
             cash_flow_count=cash_count,
             skipped_rows=skipped_rows,
+            inserted_count=inserted_count,
+            duplicate_count=duplicate_count,
+            skipped_count=benign_empty_count,
+            failed_rows=failed_rows,
             parse_errors=parse_errors,
             total_rows=total_rows,
             status=status,

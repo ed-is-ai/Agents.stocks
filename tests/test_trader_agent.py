@@ -118,6 +118,63 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
     assert portfolio[0].shares == 10.0  # not 20.0
 
 
+def test_sipp_reports_inserted_then_duplicate_outcomes(tmp_path: Path) -> None:
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,5000.00\n"
+    )
+    path = tmp_path / "sipp.csv"
+    path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    first = agent.import_sipp(path)
+    second = agent.import_sipp(path)
+    assert (first.inserted_count, first.duplicate_count, first.buy_count) == (2, 0, 2)
+    assert (second.inserted_count, second.duplicate_count, second.buy_count) == (
+        0,
+        2,
+        0,
+    )
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 2
+
+
+def test_sipp_rejected_plan_reports_four_outcomes_without_writing(
+    tmp_path: Path,
+) -> None:
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B456,not-a-number,200.00,Buy MSFT,REF-B,1000.00,,5000.00\n"
+        ",,,,,,,,,\n"
+    )
+    path = tmp_path / "rejected.csv"
+    path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    result = agent.import_sipp(path)
+    assert result.status == "rejected"
+    assert (result.inserted_count, result.duplicate_count, result.skipped_count) == (
+        1,
+        0,
+        1,
+    )
+    assert len(result.failed_rows) == 1
+    assert result.total_rows == 3
+    assert (
+        result.inserted_count
+        + result.duplicate_count
+        + result.skipped_count
+        + len(result.failed_rows)
+        == result.total_rows
+    )
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+
+
 def test_idempotency_key_is_content_based_and_excludes_reference() -> None:
     key = _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
     assert key == _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
@@ -490,9 +547,9 @@ def test_sipp_unparseable_cash_amount_is_skipped_not_silently_dropped(
     assert result.buy_count == 0
     assert result.sell_count == 0
     assert result.cash_flow_count == 0
-    assert len(result.skipped_rows) == 1
-    assert "unparseable cash amount" in result.skipped_rows[0]
-    assert result.status == "ok"
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    assert "unparseable cash amount" in result.failed_rows[0]
 
 
 def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> None:
@@ -562,13 +619,12 @@ def test_sipp_logs_and_skips_malformed_quantity(tmp_path: Path, caplog) -> None:
     with caplog.at_level(logging.WARNING):
         result = agent.import_sipp(csv_path)
 
-    # The malformed AAPL row was skipped (and logged); the valid MSFT row imported.
-    portfolio = agent.get_portfolio()
-    assert {p.ticker for p in portfolio} == {"MSFT"}
+    # The malformed AAPL row rejects the whole plan; no partial write occurs.
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    assert agent.get_portfolio() == []
     assert any("unparseable quantity" in r.message for r in caplog.records)
-    # The skip is now surfaced in the result, not just logged (#152).
-    assert len(result.skipped_rows) == 1
-    assert "REF-BAD" in result.skipped_rows[0]
+    assert "REF-BAD" in result.failed_rows[0]
 
 
 def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:

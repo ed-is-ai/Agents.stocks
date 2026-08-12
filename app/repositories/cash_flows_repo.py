@@ -4,6 +4,7 @@ from typing import Any
 
 from app.repositories.db import Connect, session
 from app.schemas.trade import CashFlow
+from app.schemas.trade import SippImportRowOutcome
 
 
 def _row_to_cash_flow(row: tuple[Any, ...]) -> CashFlow:
@@ -54,14 +55,14 @@ class CashFlowsRepository:
         reference: str | None,
         portfolio_id: int | None = None,
         idempotency_key: str | None = None,
-    ) -> None:
+    ) -> SippImportRowOutcome:
         """Insert a cash flow with ``INSERT OR IGNORE`` on the given connection.
 
         The ``(portfolio_id, reference)`` pair makes the SIPP import idempotent
         per-portfolio. Inserts share the import's connection so the whole import
         is one transaction.
         """
-        conn.execute(
+        cur = conn.execute(
             "INSERT OR IGNORE INTO cash_flows "
             "(date, flow_type, ticker, amount, description, reference, portfolio_id, idempotency_key) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -76,3 +77,14 @@ class CashFlowsRepository:
                 idempotency_key,
             ),
         )
+        return "inserted" if cur.rowcount else "duplicate"
+
+    def idempotency_keys_for_portfolio(self, portfolio_id: int | None) -> set[str]:
+        bucket = -1 if portfolio_id is None else portfolio_id
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT idempotency_key FROM cash_flows "
+                "WHERE ifnull(portfolio_id, -1) = ? AND idempotency_key IS NOT NULL",
+                (bucket,),
+            ).fetchall()
+        return {str(row[0]) for row in rows}

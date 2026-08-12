@@ -4,6 +4,7 @@ from typing import Any
 
 from app.repositories.db import Connect, session
 from app.schemas import Trade
+from app.schemas.trade import SippImportRowOutcome
 
 # Dates are stored ISO (YYYY-MM-DD), which sorts chronologically as text.
 _DATE_SORT = "date"
@@ -76,14 +77,14 @@ class TradesRepository:
         reference: str | None = None,
         portfolio_id: int | None = None,
         idempotency_key: str | None = None,
-    ) -> None:
+    ) -> SippImportRowOutcome:
         """Insert a trade with ``INSERT OR IGNORE`` on the given connection.
 
         Used by the SIPP import, which batches many rows in one transaction.
         The idempotency key is ``(portfolio_id, reference)`` so the same CSV
         can import into different portfolios independently.
         """
-        conn.execute(
+        cur = conn.execute(
             "INSERT OR IGNORE INTO trades "
             "(ticker, action, shares, price, date, notes, reference, portfolio_id, idempotency_key) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -99,6 +100,17 @@ class TradesRepository:
                 idempotency_key,
             ),
         )
+        return "inserted" if cur.rowcount else "duplicate"
+
+    def idempotency_keys_for_portfolio(self, portfolio_id: int | None) -> set[str]:
+        bucket = -1 if portfolio_id is None else portfolio_id
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT idempotency_key FROM trades "
+                "WHERE ifnull(portfolio_id, -1) = ? AND idempotency_key IS NOT NULL",
+                (bucket,),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
 
     def set_ack(self, conn: Any, trade_id: int, acknowledged_at: str | None) -> None:
         """Set or clear a trade's realised-P&L acknowledgment timestamp.

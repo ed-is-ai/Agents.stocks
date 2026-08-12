@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
+
+SippImportRowOutcome = Literal["inserted", "duplicate", "skipped", "failed"]
 
 
 class SippImportResult(BaseModel):
@@ -24,9 +28,13 @@ class SippImportResult(BaseModel):
     sell_count: int = 0
     cash_flow_count: int = 0
     skipped_rows: list[str] = []
+    inserted_count: int = 0
+    duplicate_count: int = 0
+    skipped_count: int = 0
+    failed_rows: list[str] = []
     parse_errors: list[str] = []
     total_rows: int = 0
-    status: str = "ok"
+    status: Literal["ok", "rejected", "error"] = "ok"
 
 
 class Portfolio(BaseModel):
