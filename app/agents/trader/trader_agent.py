@@ -986,13 +986,13 @@ class TraderAgent(Agent):
                     conn, portfolio_id, cash_balance, cash_asof
                 )
 
-            effective_cash_balance = self._account.get_on_connection(
-                conn, self._cash_key(portfolio_id)
-            )
-            effective_cash_balance = (
-                float(effective_cash_balance)
-                if effective_cash_balance is not None
-                else 0.0
+            # Read the balance that is actually committed -- never this
+            # file's own candidate, which _apply_import_cash_balance may
+            # have just rejected as stale. Read on the open transaction
+            # connection so it sees this import's own write, and reuse the
+            # value below rather than re-reading on a second connection.
+            effective_cash_balance = self._effective_cash_balance(
+                conn, portfolio_id, cash_balance
             )
             if portfolio_id is not None:
                 self._write_import_snapshot(
@@ -1013,9 +1013,6 @@ class TraderAgent(Agent):
             # only run after the transaction above has successfully
             # committed (never for a rejected plan, never before the cash
             # balance it reads has landed).
-            effective_cash_balance = self.get_cash_balance(portfolio_id)
-            if effective_cash_balance is None:
-                effective_cash_balance = 0.0
             self.update_portfolio_snapshot(effective_cash_balance, portfolio_id)
 
         # Every data row must land in exactly one bucket -- a mismatch means
@@ -1035,7 +1032,11 @@ class TraderAgent(Agent):
             f"{cash_count} cash flows, {duplicate_count} duplicates, "
             f"{benign_empty_count} skipped, "
             f"{len(parse_errors)} parse errors, status={status}. "
-            f"Cash balance: GBP {cash_balance:,.2f}"
+            # The effective balance, matching what the result and the page
+            # report -- printing this file's own candidate here would show a
+            # number that was rejected as stale and appears nowhere else.
+            f"Cash balance: GBP {effective_cash_balance:,.2f} "
+            f"(this file's candidate: GBP {cash_balance:,.2f})"
         )
         return SippImportResult(
             cash_balance=effective_cash_balance,
@@ -1105,6 +1106,31 @@ class TraderAgent(Agent):
             if portfolio_id is not None
             else "cash_balance_date"
         )
+
+    def _effective_cash_balance(
+        self, conn: Any, portfolio_id: int | None, fallback: float
+    ) -> float:
+        """Return the cash balance actually committed for ``portfolio_id``.
+
+        Read on the caller's open connection so it reflects writes made
+        earlier in the same transaction. A stored value that cannot be
+        parsed as a number falls back to ``fallback`` rather than raising:
+        this runs inside the import's write transaction, so one malformed
+        legacy value must not roll back an otherwise valid import.
+        """
+        stored = self._account.get_on_connection(conn, self._cash_key(portfolio_id))
+        if stored is None:
+            return 0.0
+        try:
+            return float(stored)
+        except (TypeError, ValueError):
+            logger.warning(
+                "unparseable stored cash balance %r for portfolio %s; "
+                "falling back to this import's own balance",
+                stored,
+                portfolio_id,
+            )
+            return fallback
 
     def _apply_import_cash_balance(
         self, conn: Any, portfolio_id: int | None, amount: float, as_of: str | None
