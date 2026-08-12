@@ -7,6 +7,7 @@ import pytest
 from app.agents.trader.trader_agent import (
     SippImportError,
     TraderAgent,
+    _detect_reconciliation_issues,
     _idempotency_key,
     _to_iso_date,
 )
@@ -1137,6 +1138,228 @@ def test_sipp_ambiguous_single_separator_three_digits_rejects_whole_plan(
     assert result.status == "rejected"
     assert any("ambiguous_currency" in e for e in result.failed_rows)
     assert agent.get_portfolio() == []
+
+
+def test_sipp_row_with_both_debit_and_credit_rejects_whole_plan(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC4: a row with both Debit and Credit populated is
+    contradictory monetary evidence -- rejected as a validation error, not
+    silently resolved by preferring Debit (today's ``"BUY" if debit > 0
+    else "SELL" if credit > 0`` always prefers Debit when both are set)."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Contradictory row,REF-DC,100.00,50.00,500.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "rejected"
+    assert any(
+        "REF-DC" in e and "both Debit" in e and "Credit" in e
+        for e in result.failed_rows
+    )
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_row_with_only_debit_or_only_credit_imports_normally(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC4 (negative case): the contradiction fix must not
+    reject legitimate single-sided rows."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Withdrawal,REF-D,100.00,,400.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,REF-C,,50.00,450.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "ok"
+    assert result.cash_flow_count == 2
+
+
+def test_detect_reconciliation_issues_flags_a_broken_checkpoint() -> None:
+    """Story 1.5, AC5: a statement balance that doesn't reconcile against
+    the intervening cash movements is detected. Rows are given in the
+    SIPP export's reverse-chronological file order (newest first); the
+    detector walks them in true chronological order internally."""
+    rows = [
+        {
+            "Date": "03/01/2024",
+            "Reference": "R3",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "600.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R2",
+            "Debit": "",
+            "Credit": "100.00",
+            "Running Balance": "500.00",
+        },
+        {
+            "Date": "01/01/2024",
+            "Reference": "R1",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "400.00",
+        },
+    ]
+    issues = _detect_reconciliation_issues(rows)
+    assert len(issues) == 1
+    currency, date, prior, expected, actual, difference, row_ref = issues[0]
+    assert currency == "GBP"
+    assert date == "2024-01-03"
+    assert prior == 500.0
+    assert expected == 500.0
+    assert actual == 600.0
+    assert difference == 100.0
+    assert row_ref == "R3"
+
+
+def test_detect_reconciliation_issues_clean_fixture_reports_nothing() -> None:
+    """Story 1.5, AC5 (negative case): a fully-reconciling fixture (every
+    checkpoint matches prior + intervening movements) reports zero issues."""
+    rows = [
+        {
+            "Date": "03/01/2024",
+            "Reference": "R3",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "500.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R2",
+            "Debit": "",
+            "Credit": "100.00",
+            "Running Balance": "500.00",
+        },
+        {
+            "Date": "01/01/2024",
+            "Reference": "R1",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "400.00",
+        },
+    ]
+    assert _detect_reconciliation_issues(rows) == []
+
+
+def test_detect_reconciliation_issues_scoped_per_currency() -> None:
+    """A EUR checkpoint must never reconcile against GBP/USD movements --
+    each currency tracks its own independent checkpoint/movement state."""
+    rows = [
+        # Newest first (reverse-chronological), interleaving two currencies.
+        {
+            "Date": "03/01/2024",
+            "Reference": "R4",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "€300.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R3",
+            "Debit": "",
+            "Credit": "£100.00",
+            "Running Balance": "£500.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R2",
+            "Debit": "",
+            "Credit": "€100.00",
+            "Running Balance": "€200.00",
+        },
+        {
+            "Date": "01/01/2024",
+            "Reference": "R1",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "£400.00",
+        },
+    ]
+    # GBP: 400 -> +100 -> 500 (matches). EUR: first checkpoint 200 (no
+    # prior EUR movement in this fixture) -> +0 -> 300 (mismatch: 200 != 300).
+    issues = _detect_reconciliation_issues(rows)
+    assert len(issues) == 1
+    currency, date, prior, expected, actual, difference, row_ref = issues[0]
+    assert currency == "EUR"
+    assert row_ref == "R4"
+    assert prior == 200.0
+    assert expected == 200.0
+    assert actual == 300.0
+
+
+def test_sipp_import_persists_reconciliation_issue_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC5: a fixture with a deliberately broken Running Balance
+    produces one row in ``cash_reconciliation_issues`` after import,
+    retrievable via ``list_reconciliation_issues``, and the count is
+    surfaced immediately on the result."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "03/01/2024,n/a,n/a,n/a,n/a,Statement,R3,,,600.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,R2,,100.00,500.00\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Opening,R1,,,400.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+
+    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
+
+    assert result.status == "ok"
+    assert result.reconciliation_issue_count == 1
+    issues = agent.list_reconciliation_issues(pf.id)
+    assert len(issues) == 1
+    assert issues[0][7] == "R3"  # row_ref
+
+
+def test_sipp_import_clean_fixture_records_no_reconciliation_issues(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC5 (negative case): a fully-reconciling fixture produces
+    zero reconciliation issues."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "03/01/2024,n/a,n/a,n/a,n/a,Statement,R3,,,500.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,R2,,100.00,500.00\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Opening,R1,,,400.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+
+    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
+
+    assert result.status == "ok"
+    assert result.reconciliation_issue_count == 0
+    assert agent.list_reconciliation_issues(pf.id) == []
 
 
 def test_import_sipp_never_opens_a_file_path(

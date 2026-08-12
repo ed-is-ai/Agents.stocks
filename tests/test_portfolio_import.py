@@ -526,6 +526,41 @@ def test_rejected_stale_balance_never_reaches_the_rendered_page(
     assert "4,000.00" not in contexts[-1]["import_message"]
 
 
+def test_reconciliation_route_renders_detected_issue(tmp_path: Path) -> None:
+    """Story 1.5, AC5: the dedicated reconciliation view route returns 200
+    and renders a detected issue's date/expected/actual/difference -- no
+    new route-level logic beyond a thin passthrough was needed, since this
+    is an unauthenticated GET (read) matching ``/partials/portfolio``."""
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.trader_service import TraderService
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "03/01/2024,n/a,n/a,n/a,n/a,Statement,R3,,,600.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,R2,,100.00,500.00\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Opening,R1,,,400.00\n"
+    )
+    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+
+    trader = TraderService(agent)
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    try:
+        resp = client.get(f"/portfolio/{pf.id}/reconciliation")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert "2024-01-03" in resp.text
+    assert "500.00" in resp.text
+    assert "600.00" in resp.text
+    assert "R3" in resp.text
+
+
 def test_forbidden_without_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
     resp = client.post("/import-sipp", files={"file": ("merged.csv", _CSV, "text/csv")})

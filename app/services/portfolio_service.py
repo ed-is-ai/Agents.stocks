@@ -533,12 +533,20 @@ class PortfolioService:
             if portfolio_id is not None
             else []
         )
+        # Story 1.5, AC5: a count-only pointer to the dedicated
+        # reconciliation view -- the detail lives there, not here.
+        reconciliation_issue_count = (
+            len(self._trader.list_reconciliation_issues(portfolio_id))
+            if portfolio_id is not None
+            else 0
+        )
         return {
             "positions": positions,
             "portfolio_id": portfolio_id,
             "portfolios": portfolios,
             "active_portfolio": active_portfolio,
             "cash_flows": cash_flows,
+            "reconciliation_issue_count": reconciliation_issue_count,
             "positions_with_value": positions_with_value,
             "total_cost_gbp": total_cost_gbp,
             "total_value_gbp": total_value_gbp,
