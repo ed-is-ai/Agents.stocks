@@ -81,8 +81,13 @@ class TradesRepository:
         """Insert a trade with ``INSERT OR IGNORE`` on the given connection.
 
         Used by the SIPP import, which batches many rows in one transaction.
-        The idempotency key is ``(portfolio_id, reference)`` so the same CSV
-        can import into different portfolios independently.
+        Dedupe is keyed on ``(portfolio_id, idempotency_key)`` so the same
+        CSV can import into different portfolios independently.
+
+        Returns the row's actual outcome: ``"inserted"`` when the row was
+        written, ``"duplicate"`` when the unique index silently suppressed
+        it. Never returns ``"skipped"``/``"failed"`` — those are decided at
+        plan-build time and such a row never reaches this call.
         """
         cur = conn.execute(
             "INSERT OR IGNORE INTO trades "
@@ -103,6 +108,11 @@ class TradesRepository:
         return "inserted" if cur.rowcount else "duplicate"
 
     def idempotency_keys_for_portfolio(self, portfolio_id: int | None) -> set[str]:
+        """Return every trade idempotency key already stored for a portfolio.
+
+        Read-only: lets the SIPP import classify a row as inserted or
+        duplicate before deciding whether to write anything at all.
+        """
         bucket = -1 if portfolio_id is None else portfolio_id
         with session(self._connect) as conn:
             rows = conn.execute(
@@ -183,6 +193,28 @@ class TradesRepository:
         sql += f" ORDER BY {_DATE_SORT}, id"
         with session(self._connect) as conn:
             return conn.execute(sql, params).fetchall()
+
+    def open_rows_on_connection(
+        self, conn: Any, portfolio_id: int | None = None
+    ) -> list[tuple[Any, ...]]:
+        """Return valid-ticker trade rows for replay on the caller's connection.
+
+        Identical query to ``open_rows`` but executed against the caller's
+        open connection instead of a fresh one — used by the SIPP import so
+        its in-transaction snapshot calculation sees this transaction's own
+        not-yet-committed trade inserts (a separate connection would only
+        see the database's last *committed* state and silently miss them).
+        """
+        sql = (
+            f"SELECT {_REPLAY_COLUMNS} FROM trades"
+            " WHERE ticker NOT IN ('', 'n/a', 'N/A')"
+        )
+        params: tuple[Any, ...] = ()
+        if portfolio_id is not None:
+            sql += " AND portfolio_id = ?"
+            params = (portfolio_id,)
+        sql += f" ORDER BY {_DATE_SORT}, id"
+        return conn.execute(sql, params).fetchall()
 
     def held_tickers(self) -> set[str]:
         """Return the set of tickers with a net-positive position in any

@@ -9,6 +9,9 @@ from app.agents.trader.trader_agent import (
     _idempotency_key,
     _to_iso_date,
 )
+from app.core.config import PORTFOLIO_VALUE_CSV
+from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
+from app.repositories.trades_repo import TradesRepository
 
 
 def test_record_multiple_buys(tmp_path: Path) -> None:
@@ -109,8 +112,8 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    agent.import_sipp(csv_path)
-    agent.import_sipp(csv_path)  # re-import must not duplicate
+    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes())  # re-import must not duplicate
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -119,18 +122,26 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_sipp_reports_inserted_then_duplicate_outcomes(tmp_path: Path) -> None:
+    """Re-importing the same CSV reports duplicates, not a second success.
+
+    Story 1.8, AC #2/#4: ``buy_count`` counts only rows that genuinely
+    inserted, so a row suppressed by the unique index shows up as a
+    duplicate instead of being folded into the success count.
+    """
     csv_text = (
-        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
         "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
         "02/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,5000.00\n"
     )
-    path = tmp_path / "sipp.csv"
-    path.write_text(csv_text, encoding="utf-8")
+    csv_bytes = csv_text.encode("utf-8")
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    first = agent.import_sipp(path)
-    second = agent.import_sipp(path)
+
+    first = agent.import_sipp(csv_bytes)
+    second = agent.import_sipp(csv_bytes)
+
     assert (first.inserted_count, first.duplicate_count, first.buy_count) == (2, 0, 2)
     assert (second.inserted_count, second.duplicate_count, second.buy_count) == (
         0,
@@ -144,18 +155,24 @@ def test_sipp_reports_inserted_then_duplicate_outcomes(tmp_path: Path) -> None:
 def test_sipp_rejected_plan_reports_four_outcomes_without_writing(
     tmp_path: Path,
 ) -> None:
+    """Story 1.8, AC #5: a rejected plan still reports all four outcomes.
+
+    The inserted/duplicate counts come from the read-only pre-check (no
+    write is ever attempted), and they still reconcile against total_rows.
+    """
     csv_text = (
-        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
         "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
         "02/02/2024,MSFT,B456,not-a-number,200.00,Buy MSFT,REF-B,1000.00,,5000.00\n"
         ",,,,,,,,,\n"
     )
-    path = tmp_path / "rejected.csv"
-    path.write_text(csv_text, encoding="utf-8")
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    result = agent.import_sipp(path)
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
     assert result.status == "rejected"
     assert (result.inserted_count, result.duplicate_count, result.skipped_count) == (
         1,
@@ -182,32 +199,44 @@ def test_idempotency_key_is_content_based_and_excludes_reference() -> None:
 
 
 def test_overlapping_sipp_files_dedupe_without_reference(tmp_path: Path) -> None:
-    header = "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+    header = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+    )
     first = header + "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,,1000.00,,5000.00\n"
     second = header + "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,N/A,1000.00,,5000.00\n"
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    (tmp_path / "one.csv").write_text(first, encoding="utf-8")
-    (tmp_path / "two.csv").write_text(second, encoding="utf-8")
-    agent.import_sipp(tmp_path / "one.csv")
-    agent.import_sipp(tmp_path / "two.csv")
+
+    agent.import_sipp(first.encode("utf-8"))
+    result = agent.import_sipp(second.encode("utf-8"))
+
+    # The second file's row is the same content with a different Reference --
+    # the content-based key still recognises it as an already-imported row.
+    assert (result.inserted_count, result.duplicate_count) == (0, 1)
     with sqlite3.connect(agent.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
 
 
 def test_reference_no_reference_casing_is_normalized(tmp_path: Path) -> None:
-    header = "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+    header = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+    )
     rows = "".join(
         f"01/02/2024,AAPL,B123,10,100.00,Buy AAPL,{ref},1000.00,,5000.00\n"
         for ref in ("N/A", "n/a")
     )
-    path = tmp_path / "casing.csv"
-    path.write_text(header + rows, encoding="utf-8")
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(path)
+
+    result = agent.import_sipp((header + rows).encode("utf-8"))
+
+    # Two identical rows within one file: the second is a duplicate, and the
+    # read-only pre-check must agree with what INSERT OR IGNORE actually did.
+    assert (result.inserted_count, result.duplicate_count) == (1, 1)
     with sqlite3.connect(agent.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
 
@@ -229,7 +258,7 @@ def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     trades = agent.get_trade_history()
     assert len(trades) == 1
@@ -256,7 +285,7 @@ def test_import_sipp_handles_mojibake_bom_in_first_header(tmp_path: Path) -> Non
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     trades = agent.get_trade_history()
     assert len(trades) == 1
@@ -288,9 +317,15 @@ def test_oversell_is_logged_and_clamped(tmp_path: Path, caplog) -> None:
     assert any("Oversell" in r.message for r in caplog.records)
 
 
-def test_import_sipp_rolls_back_on_error(tmp_path: Path) -> None:
-    # Smoke for the try/finally transaction boundary: a clean, well-formed
-    # import yields exactly one position and releases the connection.
+def test_import_sipp_clean_well_formed_import_commits_and_closes_connection(
+    tmp_path: Path,
+) -> None:
+    # Smoke test only -- this does NOT exercise rollback (a clean,
+    # well-formed import commits successfully and releases the connection).
+    # See test_import_sipp_mid_commit_failure_rolls_back_everything and
+    # test_import_sipp_commit_failure_before_any_write_also_rolls_back below
+    # for the actual rollback-on-failure regression coverage (Story 1.2,
+    # Gate 7).
     csv_text = (
         "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
         "Running Balance\n"
@@ -301,8 +336,176 @@ def test_import_sipp_rolls_back_on_error(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
     assert len(agent.get_portfolio()) == 1
+
+
+def _table_counts(db_path: Path, portfolio_id: int) -> dict[str, int]:
+    """Raw-SQL row counts across all four of Story 1.2's atomic-commit
+    targets, scoped to one portfolio. Direct DB inspection (not
+    ``agent.get_portfolio()``) is required to prove AC #1/#3 -- a
+    portfolio-view check alone would not observe cash-balance/snapshot
+    state left behind by a partial commit."""
+    conn = sqlite3.connect(db_path)
+    try:
+        trades = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE portfolio_id = ?", (portfolio_id,)
+        ).fetchone()[0]
+        cash_flows = conn.execute(
+            "SELECT COUNT(*) FROM cash_flows WHERE portfolio_id = ?", (portfolio_id,)
+        ).fetchone()[0]
+        cash_balance_key = conn.execute(
+            "SELECT COUNT(*) FROM account_state WHERE key = ?",
+            (f"cash_balance:{portfolio_id}",),
+        ).fetchone()[0]
+        snapshots = conn.execute(
+            "SELECT COUNT(*) FROM portfolio_snapshots WHERE portfolio_id = ?",
+            (portfolio_id,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return {
+        "trades": trades,
+        "cash_flows": cash_flows,
+        "account_state": cash_balance_key,
+        "portfolio_snapshots": snapshots,
+    }
+
+
+def test_import_sipp_rejected_plan_leaves_zero_rows_in_all_four_tables(
+    tmp_path: Path,
+) -> None:
+    """Story 1.2, AC #1/#3: a plan with several otherwise-good rows (a
+    trade and a cash flow) plus one bad row leaves zero rows in every one
+    of the four atomic-commit targets -- inspected directly via raw SQL,
+    not just ``agent.get_portfolio()``, which would not observe cash
+    balance or snapshot state."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
+        "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+        "03/01/2024,MSFT,B2,notanumber,100.00,Buy MSFT,REF-BAD,1000.00,,1500.00\n"
+    )
+
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    counts = _table_counts(agent.db_path, pf.id)
+    assert counts == {
+        "trades": 0,
+        "cash_flows": 0,
+        "account_state": 0,
+        "portfolio_snapshots": 0,
+    }
+    assert agent.get_portfolio(portfolio_id=pf.id) == []
+
+
+def test_import_sipp_mid_commit_failure_rolls_back_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 1.2, AC #3: inject a failure inside the commit phase *after*
+    trades/cash-flows/account-state would already have been written to the
+    open (uncommitted) connection -- proving the rollback undoes
+    already-executed-but-uncommitted statements, not just prevents later
+    ones from starting. The snapshot append (the last write in the commit
+    phase) is monkeypatched to raise."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom: snapshot append failed")
+
+    monkeypatch.setattr(PortfolioSnapshotsRepository, "append_on_connection", _boom)
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
+        "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+
+    counts = _table_counts(agent.db_path, pf.id)
+    assert counts == {
+        "trades": 0,
+        "cash_flows": 0,
+        "account_state": 0,
+        "portfolio_snapshots": 0,
+    }
+    assert agent.get_portfolio(portfolio_id=pf.id) == []
+
+
+def test_import_sipp_commit_failure_before_any_write_also_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Companion to the mid-commit-failure test above: a failure on the
+    very *first* write inside the commit phase (before cash-flows,
+    account-state, or the snapshot are ever touched) also leaves nothing
+    durable -- both ends of the transaction are covered."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom: first trade insert failed")
+
+    monkeypatch.setattr(TradesRepository, "insert_ignore", _boom)
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+
+    counts = _table_counts(agent.db_path, pf.id)
+    assert counts == {
+        "trades": 0,
+        "cash_flows": 0,
+        "account_state": 0,
+        "portfolio_snapshots": 0,
+    }
+
+
+def test_import_sipp_reports_every_failed_row_with_distinguishable_reason(
+    tmp_path: Path,
+) -> None:
+    """Story 1.2, AC #4: a plan with two or more distinct bad rows reports
+    every one of them in ``failed_rows``, each with a distinguishable
+    reason -- not just the first one encountered."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B1,notanumber,100.00,Buy AAPL,REF-BAD-QTY,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B2,5,-100.00,Buy MSFT,REF-BAD-PRICE,1000.00,,4000.00\n"
+    )
+
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 2
+    joined = " | ".join(result.failed_rows)
+    assert "REF-BAD-QTY" in joined and "unparseable quantity" in joined
+    assert "REF-BAD-PRICE" in joined and "non-positive" in joined
 
 
 def test_replay_orders_by_trade_date_not_file_order(tmp_path: Path) -> None:
@@ -320,7 +523,7 @@ def test_replay_orders_by_trade_date_not_file_order(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -344,7 +547,7 @@ def test_replay_correct_with_mixed_date_formats(tmp_path: Path) -> None:
     )
     csv_path = tmp_path / "sipp.csv"
     csv_path.write_text(csv_text, encoding="utf-8")
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -373,7 +576,7 @@ def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path.read_bytes())
 
     conn = sqlite3.connect(agent.db_path)
     rows = conn.execute(
@@ -409,7 +612,7 @@ def test_sipp_parses_eur_and_usd_amounts(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.parse_errors == []
     assert result.skipped_rows == []
@@ -442,7 +645,7 @@ def test_sipp_imports_dividend_row_that_has_symbol_but_no_quantity(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.buy_count == 0 and result.sell_count == 0
     conn = sqlite3.connect(agent.db_path)
@@ -472,7 +675,7 @@ def test_sipp_issue_detail_falls_back_to_csv_row_when_reference_is_na(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert len(result.parse_errors) == 1
     # Row 1 is the header, so the first data row is CSV row 2.
@@ -495,7 +698,7 @@ def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
     assert result.cash_balance == 500.0
 
 
@@ -516,20 +719,21 @@ def test_sipp_total_rows_and_status_ok_when_every_row_is_accounted_for(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 2
     assert result.buy_count + result.cash_flow_count == result.total_rows
     assert result.status == "ok"
 
 
-def test_sipp_unparseable_cash_amount_is_skipped_not_silently_dropped(
+def test_sipp_unparseable_cash_amount_rejects_the_whole_plan(
     tmp_path: Path,
 ) -> None:
     """A non-trade row whose Debit/Credit is unparseable lands at amount=0
-    with no Quantity/Symbol to make it a trade. It must be recorded in
-    ``skipped_rows`` (not silently dropped) so the row-count reconciliation
-    stays "ok" while still surfacing the bad value to the user (#187)."""
+    with no Quantity/Symbol to make it a trade -- this row cannot be safely
+    written, so under the all-or-nothing commit rule (Story 1.2, AC #2) the
+    entire plan is rejected, not silently skipped-but-still-committed
+    (#187, #210)."""
     csv_text = (
         "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
         "Running Balance\n"
@@ -541,15 +745,16 @@ def test_sipp_unparseable_cash_amount_is_skipped_not_silently_dropped(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 1
     assert result.buy_count == 0
     assert result.sell_count == 0
     assert result.cash_flow_count == 0
-    assert result.status == "rejected"
+    assert result.skipped_rows == []
     assert len(result.failed_rows) == 1
     assert "unparseable cash amount" in result.failed_rows[0]
+    assert result.status == "rejected"
 
 
 def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> None:
@@ -568,7 +773,7 @@ def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> Non
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 1
     assert result.skipped_rows == []
@@ -601,7 +806,15 @@ def test_replay_correct_when_record_buy_uses_ddmmyyyy(tmp_path: Path) -> None:
     assert portfolio[0].entry_date == "2024-02-01"
 
 
-def test_sipp_logs_and_skips_malformed_quantity(tmp_path: Path, caplog) -> None:  # type: ignore[type-arg]
+def test_sipp_malformed_quantity_rejects_the_whole_plan_including_good_rows(
+    tmp_path: Path, caplog
+) -> None:  # type: ignore[type-arg]
+    """Story 1.2, AC #2: under the all-or-nothing commit rule, one malformed
+    row rejects the *entire* plan -- including rows that would otherwise
+    have resolved to ``inserted`` (the well-formed MSFT buy here). This
+    directly regression-guards against the old partial-success behavior
+    where a bad row was merely skipped while everything else still
+    committed."""
     import logging
 
     csv_text = (
@@ -617,14 +830,16 @@ def test_sipp_logs_and_skips_malformed_quantity(tmp_path: Path, caplog) -> None:
     agent._init_db()
 
     with caplog.at_level(logging.WARNING):
-        result = agent.import_sipp(csv_path)
+        result = agent.import_sipp(csv_path.read_bytes())
 
-    # The malformed AAPL row rejects the whole plan; no partial write occurs.
-    assert result.status == "rejected"
-    assert len(result.failed_rows) == 1
+    # Nothing committed -- not even the well-formed MSFT buy.
     assert agent.get_portfolio() == []
-    assert any("unparseable quantity" in r.message for r in caplog.records)
+    assert result.status == "rejected"
+    assert result.skipped_rows == []
+    assert len(result.failed_rows) == 1
     assert "REF-BAD" in result.failed_rows[0]
+    assert "unparseable quantity" in result.failed_rows[0]
+    assert any("unparseable quantity" in r.message for r in caplog.records)
 
 
 def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:
@@ -637,15 +852,17 @@ def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:
     agent._init_db()
 
     with pytest.raises(SippImportError) as exc:
-        agent.import_sipp(csv_path)
+        agent.import_sipp(csv_path.read_bytes())
     assert "Quantity" in str(exc.value)
     assert "Running Balance" in str(exc.value)
     assert agent.get_portfolio() == []
 
 
 def test_sipp_reports_parse_errors(tmp_path: Path) -> None:
-    # An unparseable Price is surfaced (not silently zeroed) and the row is
-    # skipped because the resulting price is non-positive (#152).
+    """An unparseable Price is surfaced (not silently zeroed); the resulting
+    non-positive price makes the row ``failed``, which -- under Story 1.2's
+    all-or-nothing commit rule -- rejects the whole plan, including the
+    Running Balance that row carried (#152, #210)."""
     csv_text = (
         "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
         "Running Balance\n"
@@ -657,12 +874,13 @@ def test_sipp_reports_parse_errors(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
     assert agent.get_portfolio() == []
     assert any("Price" in e for e in result.parse_errors)
     assert result.buy_count == 0
-    # Running Balance still parsed as the closing cash.
-    assert result.cash_balance == 5000.0
+    assert result.status == "rejected"
+    # Nothing was applied -- not even the Running Balance that row carried.
+    assert result.cash_balance == 0.0
 
 
 def test_sipp_clean_import_reports_counts(tmp_path: Path) -> None:
@@ -679,10 +897,103 @@ def test_sipp_clean_import_reports_counts(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path)
+    result = agent.import_sipp(csv_path.read_bytes())
     assert result.buy_count == 1
     assert result.sell_count == 1
     assert result.cash_flow_count == 1
     assert result.skipped_rows == []
     assert result.parse_errors == []
     assert result.cash_balance == 720.0
+
+
+def test_import_sipp_never_opens_a_file_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC #3 (read once): the importer must parse only the bytes it was
+    given, never re-open a CSV from disk for *reading*. Monkeypatch ``open``
+    to blow up on any ``.csv`` path opened for reading — if ``import_sipp``
+    still succeeds, it never touched the filesystem to read the CSV itself
+    (#210). ``PORTFOLIO_VALUE_CSV`` is explicitly excluded from the guard:
+    ``update_portfolio_snapshot``'s legacy (no-``portfolio_id``) branch may
+    legitimately read/append it, and that behavior is unrelated pre-existing
+    logic this story doesn't change -- excluding it by path (rather than
+    relying on this test's ``cash_balance`` happening to be non-zero, which
+    would otherwise skip that read incidentally) keeps the guard precise
+    regardless of which branch runs.
+    """
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\n"
+    )
+    csv_bytes = csv_text.encode("utf-8")
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()  # unrelated CSV seeding happens here, before the guard
+
+    real_open = open
+
+    def _guarded_open(file, mode="r", *args, **kwargs):  # type: ignore[no-untyped-def]
+        name = str(file)
+        if name.endswith(".csv") and "r" in mode and name != str(PORTFOLIO_VALUE_CSV):
+            raise AssertionError(f"import_sipp must not read a CSV path: {name}")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _guarded_open)
+
+    result = agent.import_sipp(csv_bytes)
+    assert result.buy_count == 1
+
+
+def test_import_sipp_handles_crlf_terminated_csv(tmp_path: Path) -> None:
+    """Regression for the io.StringIO newline nuance: unlike ``open(...,
+    encoding="utf-8-sig")`` with universal-newline translation,
+    ``io.StringIO`` does not translate ``\\r\\n`` -> ``\\n`` by default unless
+    ``newline=None`` is passed explicitly. Built directly as bytes (not via
+    ``Path.write_text``, which would apply platform-default newline
+    translation on write and hide the bug) to prove a CRLF-terminated
+    broker export still parses correctly (#210)."""
+    csv_bytes = (
+        b"Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        b"Running Balance\r\n"
+        b"01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\r\n"
+    )
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_bytes)
+    assert result.buy_count == 1
+    assert result.parse_errors == []
+    assert result.cash_balance == 5000.0
+
+    portfolio = agent.get_portfolio()
+    assert len(portfolio) == 1
+    assert portfolio[0].ticker == "AAPL"
+    assert portfolio[0].shares == 10.0
+
+
+def test_import_sipp_handles_bare_cr_terminated_csv(tmp_path: Path) -> None:
+    """Regression for classic Mac-style line endings (bare ``\\r``, no
+    ``\\n``), occasionally produced by older export tools/spreadsheets.
+    ``io.StringIO`` with the default ``newline='\\n'`` raises
+    ``_csv.Error: new-line character seen in unquoted field`` on this input
+    -- only ``newline=None`` (universal-newline translation, matching the
+    previous ``open(..., encoding="utf-8-sig")`` behavior) parses it
+    correctly (#210)."""
+    csv_bytes = (
+        b"Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        b"Running Balance\r"
+        b"01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\r"
+    )
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_bytes)
+    assert result.buy_count == 1
+    assert result.parse_errors == []
+    assert result.cash_balance == 5000.0

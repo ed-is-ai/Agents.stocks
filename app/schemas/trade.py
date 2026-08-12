@@ -6,6 +6,10 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+#: The four possible outcomes of one SIPP import row (FR-13/AD-25). Story
+#: 1.2 uses this vocabulary to gate the all-or-nothing commit ("did any row
+#: resolve to failed?"); as of Story 1.8 the repository insert methods also
+#: return ``inserted``/``duplicate`` so the two are no longer conflated.
 SippImportRowOutcome = Literal["inserted", "duplicate", "skipped", "failed"]
 
 
@@ -16,23 +20,42 @@ class SippImportResult(BaseModel):
     Balance). The count/list fields make otherwise-silent problems visible to
     the caller (#152) so the UI can report them instead of a false success.
 
-    ``status`` is ``"error"`` when ``buy_count + sell_count + cash_flow_count
-    + len(skipped_rows) != total_rows`` — every data row must land in exactly
-    one bucket, so a mismatch means some row was silently unaccounted for
-    (a bug, not a data-quality issue) rather than trusting a result that
-    might be quietly incomplete (#187).
+    ``status`` is one of:
+
+    - ``"ok"``: the plan committed and every row landed in a bucket that
+      reconciles cleanly against ``total_rows``.
+    - ``"error"``: the pre-existing row-accounting-mismatch safety net
+      (#187) — ``buy_count + sell_count + cash_flow_count +
+      len(skipped_rows) != total_rows``. Orthogonal to ``"rejected"``.
+    - ``"rejected"``: the plan contained at least one ``failed`` row (see
+      ``failed_rows``), so — per the all-or-nothing commit rule — nothing
+      from this plan was persisted: no trades, cash flows, cash-balance
+      update, or portfolio snapshot (#210).
+
+    Every row resolves to exactly one of the four FR-13 outcomes, so
+    ``inserted_count + duplicate_count + skipped_count + len(failed_rows)``
+    always equals ``total_rows``. For ``status="ok"`` those counts describe
+    what was actually persisted; for ``status="rejected"`` they are
+    provisional ("what would have happened") and describe no committed
+    state at all.
     """
 
     cash_balance: float
     buy_count: int = 0
     sell_count: int = 0
     cash_flow_count: int = 0
+    # Vestigial as of Story 1.2: every row-level problem ``TraderAgent.
+    # import_sipp`` used to record here now goes to ``failed_rows`` instead
+    # (an all-or-nothing plan has no partial "skip and keep going" outcome).
+    # Kept (not removed) because route/UI code and tests still construct/
+    # handle it, and a future story (e.g. a genuine reconciliation "skip"
+    # outcome) may repopulate it -- see Story 1.2's Dev Notes.
     skipped_rows: list[str] = []
     inserted_count: int = 0
     duplicate_count: int = 0
     skipped_count: int = 0
-    failed_rows: list[str] = []
     parse_errors: list[str] = []
+    failed_rows: list[str] = []
     total_rows: int = 0
     status: Literal["ok", "rejected", "error"] = "ok"
 

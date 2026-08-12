@@ -30,7 +30,6 @@ def mocked_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         "app.api.routes.portfolio.templates.TemplateResponse",
         lambda *a, **k: HTMLResponse("ok", status_code=k.get("status_code", 200)),
     )
-    monkeypatch.setattr("app.api.routes.portfolio.SIPP_IMPORT_DIR", tmp_path / "SIPP")
     monkeypatch.setattr(
         "app.api.routes.portfolio.IMPORTED_FILES_DIR", tmp_path / "imported"
     )
@@ -64,24 +63,24 @@ def _upload(filename: str = "merged.csv", content: bytes = _CSV, token: str = "s
     )
 
 
-def test_happy_path_imports_and_saves(mocked_import):
+def test_happy_path_passes_uploaded_bytes_directly(mocked_import):
     mock_trader, _, _, tmp_path = mocked_import
     resp = _upload()
 
     assert resp.status_code == 200
-    # import_sipp called once with the saved CSV path
+    # import_sipp is called once with the raw uploaded bytes, not a saved
+    # path — no shared filesystem location is written or read (#210).
     mock_trader.import_sipp.assert_called_once()
-    saved_path = Path(mock_trader.import_sipp.call_args.args[0])
-    assert saved_path == tmp_path / "SIPP" / "merged.csv"
-    # the uploaded bytes were persisted
-    assert saved_path.read_bytes() == _CSV
+    assert mock_trader.import_sipp.call_args.args[0] == _CSV
+    assert not (tmp_path / "SIPP").exists()
     mock_trader.get_portfolio.assert_called_once()
 
 
 def test_happy_path_archives_a_copy_of_the_uploaded_file(mocked_import):
     """A successful import must leave a permanent, timestamped copy under
-    data/imported/ — unlike data/processed/SIPP/merged.csv, which the next
-    upload overwrites."""
+    data/imported/ — the only on-disk trace of the upload, since the CSV is
+    parsed directly from its own request-owned bytes rather than a shared
+    working copy (#210)."""
     _, _, _, tmp_path = mocked_import
     resp = _upload(filename="q1_2024.csv")
 
@@ -231,6 +230,48 @@ def test_import_failure_returns_400(mocked_import):
     mock_notifications.record.assert_not_called()
 
 
+def test_rejected_plan_returns_400_and_never_reads_the_portfolio(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Story 1.2, AC #2/#4: when ``trader.import_sipp`` reports
+    ``status="rejected"`` (at least one row failed, nothing persisted), the
+    route must return HTTP 400, never call ``trader.get_portfolio`` (the
+    plan changed nothing), surface the failed-row detail in the rendered
+    message, and still record an ERROR-severity notification so a rejected
+    upload is visible in the notification centre, not silent. Mirrors
+    ``test_missing_columns_returns_400``/
+    ``test_row_count_mismatch_flags_error_status_and_severity``."""
+    mock_trader, _, mock_notifications, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=0.0,
+        buy_count=0,
+        sell_count=0,
+        cash_flow_count=0,
+        failed_rows=["row REF-BAD: unparseable quantity 'notanumber'"],
+        total_rows=1,
+        status="rejected",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload()
+
+    assert resp.status_code == 400
+    mock_trader.import_sipp.assert_called_once()
+    mock_trader.get_portfolio.assert_not_called()
+    assert "row REF-BAD" in calls[-1]["error_message"]
+    assert "unparseable quantity" in calls[-1]["error_message"]
+    mock_notifications.record.assert_called_once()
+    _, kwargs = mock_notifications.record.call_args
+    assert kwargs["severity"] == NotificationSeverity.ERROR
+    assert "REF-BAD" in kwargs["body"]
+
+
 def test_missing_columns_returns_400(mocked_import):
     from app.agents.trader.trader_agent import SippImportError
 
@@ -269,20 +310,97 @@ def test_happy_path_context_carries_buy_sell_counts_for_queue_aggregation(
     assert calls[-1]["import_status"] == "ok"
 
 
+def test_duplicate_rows_are_reported_as_duplicates_not_successes(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Story 1.8, AC #2/#4: re-importing an overlapping CSV must read as
+    "already imported", not as a fresh success — the counts the queue
+    aggregates carry the duplicate/inserted split, and the prose says so."""
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=5000.0,
+        buy_count=0,
+        sell_count=0,
+        cash_flow_count=0,
+        inserted_count=0,
+        duplicate_count=3,
+        skipped_count=1,
+        total_rows=4,
+        status="ok",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload()
+
+    assert resp.status_code == 200
+    assert calls[-1]["import_status"] == "ok"
+    assert calls[-1]["import_duplicate_count"] == 3
+    assert calls[-1]["import_inserted_count"] == 0
+    assert calls[-1]["import_skipped_count"] == 1
+    assert calls[-1]["import_failed_count"] == 0
+    assert "3 duplicate(s) already imported" in calls[-1]["import_message"]
+    assert "1 row(s) skipped" in calls[-1]["import_message"]
+    # A duplicate never inflates the buy count.
+    assert "Imported 0 buy(s)" in calls[-1]["import_message"]
+
+
+def test_rejected_plan_reports_all_four_outcomes_as_provisional(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Story 1.8, AC #5: a rejected plan still reports all four outcomes,
+    framed as what *would* have happened so the counts can't be mistaken for
+    a partial success."""
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=0.0,
+        inserted_count=2,
+        duplicate_count=1,
+        skipped_count=1,
+        failed_rows=["row REF-BAD: unparseable quantity 'notanumber'"],
+        total_rows=5,
+        status="rejected",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload()
+
+    assert resp.status_code == 400
+    message = calls[-1]["error_message"]
+    assert "nothing was saved" in message
+    assert "2 row(s) would have inserted" in message
+    assert "1 would have been duplicates" in message
+    assert "1 skipped" in message
+    assert calls[-1]["import_failed_count"] == 1
+    assert calls[-1]["import_status"] == "rejected"
+
+
 def test_row_count_mismatch_flags_error_status_and_severity(
     monkeypatch: pytest.MonkeyPatch, mocked_import
 ):
-    """When TraderAgent.import_sipp reports status="error" (buy/sell/cash/
-    skipped counts didn't add up to total_rows, #187), the route must carry
-    that through: the banner status context, an ERROR line in the message,
-    and ERROR notification severity — not folded into an ordinary WARNING
-    the way a data-quality skip is."""
+    """When TraderAgent.import_sipp reports status="error" (the four outcome
+    counts didn't add up to total_rows, #187), the route must carry that
+    through: the banner status context, an ERROR line in the message, and
+    ERROR notification severity — not folded into an ordinary WARNING the
+    way a data-quality skip is."""
     mock_trader, _, mock_notifications, _ = mocked_import
     mock_trader.import_sipp.return_value = SippImportResult(
         cash_balance=5000.0,
         buy_count=2,
         sell_count=0,
         cash_flow_count=1,
+        inserted_count=3,
         total_rows=4,
         status="error",
     )
@@ -309,3 +427,12 @@ def test_forbidden_without_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
     resp = client.post("/import-sipp", files={"file": ("merged.csv", _CSV, "text/csv")})
     assert resp.status_code == 403
+
+
+def test_route_module_no_longer_imports_sipp_import_dir():
+    """AC #2, import-graph level: the retired shared path constant must not
+    even be reachable from the route module, not just unused this run
+    (#210)."""
+    import app.api.routes.portfolio as portfolio_route
+
+    assert not hasattr(portfolio_route, "SIPP_IMPORT_DIR")
