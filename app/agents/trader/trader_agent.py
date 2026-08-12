@@ -6,6 +6,7 @@ Run as part of the web UI backend.
 """
 
 import csv
+import hashlib
 import logging
 import re
 from datetime import datetime
@@ -75,6 +76,13 @@ def _to_iso_date(value: str) -> str:
             continue
     logger.warning("unrecognized trade date format: %r (stored unchanged)", value)
     return value
+
+
+def _idempotency_key(
+    date: str, symbol: str, sedol: str, quantity: str, description: str
+) -> str:
+    raw = "|".join((date, symbol, sedol, quantity, description))
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 class TraderAgent(Agent):
@@ -665,7 +673,9 @@ class TraderAgent(Agent):
                 # commonly leave Reference "n/a" on every interest/dividend
                 # row, so this wasn't a hypothetical edge case.
                 reference = (
-                    reference_raw if reference_raw and reference_raw != "n/a" else None
+                    reference_raw
+                    if reference_raw and reference_raw.lower() != "n/a"
+                    else None
                 )
                 # Many providers leave Reference blank/"n/a" on non-trade rows
                 # (interest, dividends) — fall back to a 1-based CSV row number
@@ -684,7 +694,11 @@ class TraderAgent(Agent):
                 amount_had_parse_error = len(parse_errors) > _parse_errors_before
                 price = clean_amount(row.get("Price", ""), "Price", row_label)
                 date = _to_iso_date(row.get("Date", "").strip())
+                sedol = row.get("Sedol", "").strip()
                 description = row.get("Description", "").strip()
+                idempotency_key = _idempotency_key(
+                    date, symbol, sedol, qty, description
+                )
 
                 if qty and qty != "n/a":
                     # Trade if Symbol is valid or if HSBC GLOB
@@ -731,6 +745,7 @@ class TraderAgent(Agent):
                                         "",
                                         reference or None,
                                         portfolio_id,
+                                        idempotency_key,
                                     )
                                     if action == "BUY":
                                         buy_count += 1
@@ -754,6 +769,7 @@ class TraderAgent(Agent):
                                 description,
                                 reference,
                                 portfolio_id,
+                                idempotency_key,
                             )
                             cash_count += 1
                         elif amount_had_parse_error:
@@ -785,6 +801,7 @@ class TraderAgent(Agent):
                             description,
                             reference,
                             portfolio_id,
+                            idempotency_key,
                         )
                         cash_count += 1
                     elif amount_had_parse_error:

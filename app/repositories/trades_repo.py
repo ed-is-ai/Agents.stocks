@@ -75,6 +75,7 @@ class TradesRepository:
         notes: str = "",
         reference: str | None = None,
         portfolio_id: int | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         """Insert a trade with ``INSERT OR IGNORE`` on the given connection.
 
@@ -84,9 +85,19 @@ class TradesRepository:
         """
         conn.execute(
             "INSERT OR IGNORE INTO trades "
-            "(ticker, action, shares, price, date, notes, reference, portfolio_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (ticker, action, shares, price, date, notes, reference, portfolio_id),
+            "(ticker, action, shares, price, date, notes, reference, portfolio_id, idempotency_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ticker,
+                action,
+                shares,
+                price,
+                date,
+                notes,
+                reference,
+                portfolio_id,
+                idempotency_key,
+            ),
         )
 
     def set_ack(self, conn: Any, trade_id: int, acknowledged_at: str | None) -> None:

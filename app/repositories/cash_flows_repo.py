@@ -53,6 +53,7 @@ class CashFlowsRepository:
         description: str | None,
         reference: str | None,
         portfolio_id: int | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         """Insert a cash flow with ``INSERT OR IGNORE`` on the given connection.
 
@@ -62,7 +63,16 @@ class CashFlowsRepository:
         """
         conn.execute(
             "INSERT OR IGNORE INTO cash_flows "
-            "(date, flow_type, ticker, amount, description, reference, portfolio_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (date, flow_type, ticker, amount, description, reference, portfolio_id),
+            "(date, flow_type, ticker, amount, description, reference, portfolio_id, idempotency_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                date,
+                flow_type,
+                ticker,
+                amount,
+                description,
+                reference,
+                portfolio_id,
+                idempotency_key,
+            ),
         )

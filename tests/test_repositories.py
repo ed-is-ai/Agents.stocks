@@ -55,11 +55,15 @@ def test_trades_open_rows_excludes_invalid(trades_connect):
     assert [r[0] for r in rows] == ["AAPL"]
 
 
-def test_trades_insert_ignore_dedupes_reference(trades_connect):
+def test_trades_insert_ignore_dedupes_idempotency_key(trades_connect):
     repo = TradesRepository(trades_connect)
     with db.session(trades_connect) as conn:
-        repo.insert_ignore(conn, "AAPL", "BUY", 10, 100.0, "01/02/2024", "", "REF1")
-        repo.insert_ignore(conn, "AAPL", "BUY", 10, 100.0, "01/02/2024", "", "REF1")
+        repo.insert_ignore(
+            conn, "AAPL", "BUY", 10, 100.0, "01/02/2024", "", "REF1", None, "key-1"
+        )
+        repo.insert_ignore(
+            conn, "AAPL", "BUY", 10, 100.0, "01/02/2024", "", "REF1", None, "key-1"
+        )
     assert len(repo.history("AAPL")) == 1
 
 
@@ -91,8 +95,12 @@ def test_trades_set_ack_writes_and_clears(trades_connect):
 def test_cash_flows_insert_ignore_dedupes(trades_connect):
     repo = CashFlowsRepository(trades_connect)
     with db.session(trades_connect) as conn:
-        repo.insert_ignore(conn, "01/02/2024", "DIVIDEND", None, 12.5, "Div", "R1")
-        repo.insert_ignore(conn, "01/02/2024", "DIVIDEND", None, 12.5, "Div", "R1")
+        repo.insert_ignore(
+            conn, "01/02/2024", "DIVIDEND", None, 12.5, "Div", "R1", None, "key-1"
+        )
+        repo.insert_ignore(
+            conn, "01/02/2024", "DIVIDEND", None, 12.5, "Div", "R1", None, "key-1"
+        )
     with db.session(trades_connect) as conn:
         count = conn.execute("SELECT COUNT(*) FROM cash_flows").fetchone()[0]
     assert count == 1

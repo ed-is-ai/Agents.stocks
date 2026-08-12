@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from app.agents.trader.trader_agent import (
     SippImportError,
     TraderAgent,
+    _idempotency_key,
     _to_iso_date,
 )
 
@@ -114,6 +116,43 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
     assert len(portfolio) == 1
     assert portfolio[0].ticker == "AAPL"
     assert portfolio[0].shares == 10.0  # not 20.0
+
+
+def test_idempotency_key_is_content_based_and_excludes_reference() -> None:
+    key = _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
+    assert key == _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
+    assert key != _idempotency_key("2024-02-02", "AAPL", "B123", "10", "Buy AAPL")
+
+
+def test_overlapping_sipp_files_dedupe_without_reference(tmp_path: Path) -> None:
+    header = "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+    first = header + "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,,1000.00,,5000.00\n"
+    second = header + "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,N/A,1000.00,,5000.00\n"
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    (tmp_path / "one.csv").write_text(first, encoding="utf-8")
+    (tmp_path / "two.csv").write_text(second, encoding="utf-8")
+    agent.import_sipp(tmp_path / "one.csv")
+    agent.import_sipp(tmp_path / "two.csv")
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
+
+
+def test_reference_no_reference_casing_is_normalized(tmp_path: Path) -> None:
+    header = "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,Running Balance\n"
+    rows = "".join(
+        f"01/02/2024,AAPL,B123,10,100.00,Buy AAPL,{ref},1000.00,,5000.00\n"
+        for ref in ("N/A", "n/a")
+    )
+    path = tmp_path / "casing.csv"
+    path.write_text(header + rows, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp(path)
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
 
 
 def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None:
