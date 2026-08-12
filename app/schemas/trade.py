@@ -16,8 +16,9 @@ SippImportRowOutcome = Literal["inserted", "duplicate", "skipped", "failed"]
 class SippImportResult(BaseModel):
     """Outcome of a SIPP CSV import, including anything skipped or unparseable.
 
-    ``cash_balance`` is the authoritative closing balance (final Running
-    Balance). The count/list fields make otherwise-silent problems visible to
+    ``cash_balance`` is the actually-effective, already-committed portfolio
+    balance after stale-date guards have run; it is not necessarily this
+    file's closing Running Balance. The count/list fields make otherwise-silent problems visible to
     the caller (#152) so the UI can report them instead of a false success.
 
     ``status`` is one of:

@@ -596,6 +596,9 @@ class TraderAgent(Agent):
     ) -> SippImportResult:
         """Import a SIPP CSV into ``portfolio_id``; return counts and problems.
 
+        The returned cash balance is the effective committed portfolio balance
+        after stale-date protection, not necessarily this file's candidate.
+
         Parses each request's own uploaded bytes exactly once — never a
         shared filesystem path — so concurrent uploads can never read or
         overwrite one another's *input CSV* on disk (#210; this does not by
@@ -983,8 +986,18 @@ class TraderAgent(Agent):
                     conn, portfolio_id, cash_balance, cash_asof
                 )
 
+            effective_cash_balance = self._account.get_on_connection(
+                conn, self._cash_key(portfolio_id)
+            )
+            effective_cash_balance = (
+                float(effective_cash_balance)
+                if effective_cash_balance is not None
+                else 0.0
+            )
             if portfolio_id is not None:
-                self._write_import_snapshot(conn, portfolio_id, cash_balance, prices)
+                self._write_import_snapshot(
+                    conn, portfolio_id, effective_cash_balance, prices
+                )
 
             conn.commit()
         except Exception:
@@ -1000,7 +1013,10 @@ class TraderAgent(Agent):
             # only run after the transaction above has successfully
             # committed (never for a rejected plan, never before the cash
             # balance it reads has landed).
-            self.update_portfolio_snapshot(cash_balance, portfolio_id)
+            effective_cash_balance = self.get_cash_balance(portfolio_id)
+            if effective_cash_balance is None:
+                effective_cash_balance = 0.0
+            self.update_portfolio_snapshot(effective_cash_balance, portfolio_id)
 
         # Every data row must land in exactly one bucket -- a mismatch means
         # some row was silently unaccounted for (a bug), not just a
@@ -1022,7 +1038,7 @@ class TraderAgent(Agent):
             f"Cash balance: GBP {cash_balance:,.2f}"
         )
         return SippImportResult(
-            cash_balance=cash_balance,
+            cash_balance=effective_cash_balance,
             buy_count=buy_count,
             sell_count=sell_count,
             cash_flow_count=cash_count,

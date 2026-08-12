@@ -287,8 +287,17 @@ def test_cash_balance_does_not_regress_when_older_file_imported_after_newer(
     agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE).read_bytes(), pf.id)
     assert agent.get_cash_balance(pf.id) == 9000.0
     # Now import the OLDER file — balance must stay on the newer date.
-    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(), pf.id)
+    result = agent.import_sipp(
+        _write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(), pf.id
+    )
     assert agent.get_cash_balance(pf.id) == 9000.0
+    assert result.cash_balance == 9000.0
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute(
+            "SELECT cash_balance FROM portfolio_snapshots "
+            "WHERE portfolio_id = ? ORDER BY id DESC LIMIT 1",
+            (pf.id,),
+        ).fetchone()[0] == 9000.0
 
 
 def test_cash_balance_advances_when_newer_file_imported_after_older(
