@@ -261,6 +261,28 @@ def test_cash_balances_scoped_per_portfolio_and_currency(trades_connect):
     assert repo.get(2, "GBP") == (Decimal("30.00"), "2024-01-01")
 
 
+def test_cash_balances_list_all_enumerates_every_currency_for_a_portfolio(
+    trades_connect,
+):
+    """Story 1.6, Gate 3: enumerate every currency a portfolio holds a
+    balance in -- ordered by currency, scoped to one portfolio."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    repo = CashBalancesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.upsert_on_connection(conn, 1, "USD", Decimal("50.00"), "2024-01-02")
+        repo.upsert_on_connection(conn, 1, "GBP", Decimal("10.00"), "2024-01-01")
+        repo.upsert_on_connection(conn, 2, "EUR", Decimal("99.00"), "2024-01-01")
+    assert repo.list_all(1) == [
+        ("GBP", Decimal("10.00"), "2024-01-01"),
+        ("USD", Decimal("50.00"), "2024-01-02"),
+    ]
+    assert repo.list_all(2) == [("EUR", Decimal("99.00"), "2024-01-01")]
+    assert repo.list_all(None) == []
+
+
 # --- CashReconciliationRepository (Story 1.5) -------------------------------
 
 

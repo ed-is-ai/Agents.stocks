@@ -1441,6 +1441,13 @@ class TraderAgent(Agent):
         newest-first (Story 1.5, AC5)."""
         return self._cash_reconciliation.list_issues(portfolio_id, limit)
 
+    def list_cash_balances(
+        self, portfolio_id: int | None
+    ) -> list[tuple[str, Decimal, str | None]]:
+        """Return every ``(currency, amount, as_of)`` balance for a
+        portfolio (Story 1.6, Gate 3)."""
+        return self._cash_balances.list_all(portfolio_id)
+
     def refresh_portfolio_prices(
         self,
         current_prices: dict[str, float],

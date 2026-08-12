@@ -561,6 +561,101 @@ def test_reconciliation_route_renders_detected_issue(tmp_path: Path) -> None:
     assert "R3" in resp.text
 
 
+def test_portfolio_partial_renders_non_gbp_balance_without_a_fabricated_gbp_figure(
+    tmp_path: Path,
+) -> None:
+    """Story 1.6, AC1/AC3: a non-GBP cash balance renders with its real
+    currency code -- never a bare/£-prefixed number -- and, when the GBP
+    valuation is unavailable, an explicit unavailable marker rather than a
+    computed figure. Injects a fake ``GbpValuationService`` so the test
+    never touches real yfinance."""
+    from typing import Any, cast
+
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.gbp_valuation_service import GbpValuationProjection
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,US dividend,n/a,n/a,$154.86,$154.86\n"
+    )
+    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+
+    trader = TraderService(agent)
+
+    class _FakeValuation:
+        def value_in_gbp(self, money: Any) -> GbpValuationProjection:
+            return GbpValuationProjection(
+                money=money, status="valuation_unavailable", reason="fetch_failed"
+            )
+
+    portfolio = PortfolioService(trader, gbp_valuation=cast(Any, _FakeValuation()))
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: portfolio
+    try:
+        resp = client.get(f"/partials/portfolio?portfolio_id={pf.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert "USD 154.86" in resp.text
+    assert "£154.86" not in resp.text
+    assert "GBP valuation unavailable" in resp.text
+
+
+def test_cash_flow_ledger_renders_real_currency_not_a_fabricated_gbp_prefix(
+    tmp_path: Path,
+) -> None:
+    """A ``CashFlow`` row with ``currency="USD"`` renders with its real
+    currency, not £; a ``currency="GBP"`` row (today's default, and every
+    currency-less legacy row) renders unchanged."""
+    from typing import Any, cast
+
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.gbp_valuation_service import GbpValuationProjection
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,US dividend,USD1,n/a,$1.25,$1.25\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,GBP interest,GBP1,n/a,10.00,11.25\n"
+    )
+    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+
+    trader = TraderService(agent)
+
+    class _FakeValuation:
+        def value_in_gbp(self, money: Any) -> GbpValuationProjection:
+            return GbpValuationProjection(
+                money=money, status="valuation_unavailable", reason="fetch_failed"
+            )
+
+    portfolio = PortfolioService(trader, gbp_valuation=cast(Any, _FakeValuation()))
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: portfolio
+    try:
+        resp = client.get(f"/partials/portfolio?portfolio_id={pf.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert "USD 1.25" in resp.text
+    assert "£10.00" in resp.text
+    assert "£1.25" not in resp.text
+
+
 def test_forbidden_without_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
     resp = client.post("/import-sipp", files={"file": ("merged.csv", _CSV, "text/csv")})
