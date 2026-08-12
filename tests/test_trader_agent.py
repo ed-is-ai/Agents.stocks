@@ -192,6 +192,63 @@ def test_sipp_rejected_plan_reports_four_outcomes_without_writing(
         assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
 
 
+def test_sipp_mixed_plan_counts_all_four_outcomes_simultaneously(
+    tmp_path: Path,
+) -> None:
+    """Story 1.8, AC #1: one CSV holding one row of each outcome.
+
+    Each row resolves to exactly one of inserted/duplicate/skipped/failed,
+    and the four reconcile against total_rows. The failed row rejects the
+    whole plan, so the inserted/duplicate counts here describe nothing that
+    was persisted — proved by reading the tables directly rather than
+    trusting the same counters under test.
+    """
+    header = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+    )
+    already_imported = (
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp((header + already_imported).encode("utf-8"))
+
+    mixed = (
+        header
+        # duplicate -- byte-identical to the row imported above
+        + already_imported
+        # inserted -- genuinely new
+        + "03/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,4000.00\n"
+        # skipped -- no quantity, no debit/credit, nothing actionable
+        + "04/02/2024,n/a,n/a,n/a,n/a,Statement note,n/a,,,4000.00\n"
+        # failed -- unparseable quantity
+        + "05/02/2024,TSLA,B789,notanumber,300.00,Buy TSLA,REF-D,900.00,,3100.00\n"
+    )
+
+    result = agent.import_sipp(mixed.encode("utf-8"))
+
+    assert result.status == "rejected"
+    assert result.inserted_count == 1
+    assert result.duplicate_count == 1
+    assert result.skipped_count == 1
+    assert len(result.failed_rows) == 1
+    assert result.total_rows == 4
+    assert (
+        result.inserted_count
+        + result.duplicate_count
+        + result.skipped_count
+        + len(result.failed_rows)
+        == result.total_rows
+    )
+    with sqlite3.connect(agent.db_path) as conn:
+        tickers = [r[0] for r in conn.execute("SELECT ticker FROM trades").fetchall()]
+    # Only the first import's row survives: the rejected plan wrote nothing,
+    # so the "inserted" MSFT row never landed.
+    assert tickers == ["AAPL"]
+
+
 def test_idempotency_key_is_content_based_and_excludes_reference() -> None:
     key = _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
     assert key == _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
@@ -776,8 +833,12 @@ def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> Non
     result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 1
-    assert result.skipped_rows == []
     assert result.status == "ok"
+    # The FR-13 "skipped" outcome is its own count, populated from the benign
+    # no-signal rows. The vestigial skipped_rows list is a different thing
+    # and stays empty -- wiring skipped_count to it would be wrong.
+    assert result.skipped_count == 1
+    assert result.skipped_rows == []
 
 
 def test_record_buy_normalizes_ddmmyyyy_to_iso(tmp_path: Path) -> None:

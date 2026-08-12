@@ -382,6 +382,7 @@ def test_rejected_plan_reports_all_four_outcomes_as_provisional(
     assert "2 row(s) would have inserted" in message
     assert "1 would have been duplicates" in message
     assert "1 skipped" in message
+    assert "Imported" not in message  # never the ordinary success phrasing
     assert calls[-1]["import_failed_count"] == 1
     assert calls[-1]["import_status"] == "rejected"
 
