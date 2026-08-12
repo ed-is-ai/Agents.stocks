@@ -53,7 +53,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import uvicorn
-from playwright.sync_api import Browser, Page, expect, sync_playwright
+from playwright.sync_api import Browser, Dialog, Page, expect, sync_playwright
 
 from app.api.app import app
 from app.api.dependencies import (
@@ -92,8 +92,10 @@ def base_url() -> Iterator[str]:
     deadline = time.monotonic() + 10
     while not server.started and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert server.started, "live test server failed to start within 10s"
     try:
+        # Inside the try so a startup timeout still runs the finally below --
+        # otherwise the thread and bound port are never cleaned up.
+        assert server.started, "live test server failed to start within 10s"
         yield f"http://127.0.0.1:{port}"
     finally:
         server.should_exit = True
@@ -258,6 +260,22 @@ def _open_import_dropdown(page: Page) -> None:
     expect(page.locator("input[type=file]")).to_be_attached()
 
 
+def _capture_dialogs(page: Page) -> list[str]:
+    """Register a handler that dismisses every ``alert()``/``confirm()``
+    and records its message, returning the list that fills in as dialogs
+    fire. Without a handler Playwright auto-dismisses dialogs silently,
+    which is enough for tests that don't care what the alert said -- this
+    is for the ones that do."""
+    messages: list[str] = []
+
+    def _on_dialog(dialog: Dialog) -> None:
+        messages.append(dialog.message)
+        dialog.dismiss()
+
+    page.on("dialog", _on_dialog)
+    return messages
+
+
 def test_selector_disabled_during_queue_then_reenabled(
     base_url: str, mocked_trader: MagicMock, sample_csv: Path, page: Page
 ) -> None:
@@ -296,7 +314,12 @@ def test_response_for_switched_away_portfolio_is_discarded(
     #tab-content in this scenario (unlike the delete/create-portfolio
     paths), the discard branch is the only place that can undo the
     queue-start disable -- if it didn't, these controls would stay
-    disabled forever."""
+    disabled forever. Also proves the discard alert reports the file
+    that already imported before the switch -- a discard that hard-fails
+    zero files must not go silent just because nothing failed (#210
+    follow-up review)."""
+    dialog_messages = _capture_dialogs(page)
+
     _load_portfolio_tab(page, base_url)
     _open_import_dropdown(page)
 
@@ -321,6 +344,56 @@ def test_response_for_switched_away_portfolio_is_discarded(
     # The success banner (data-import-buy-count is only ever present on a
     # successful import response) never landed in #tab-content.
     expect(page.locator("#tab-content [data-import-buy-count]")).to_have_count(0)
+    # The write already happened server-side against the portfolio this
+    # queue was locked to -- the discard alert must say so.
+    assert any("1 file(s) were already imported" in m for m in dialog_messages)
+
+
+def test_discard_reports_files_already_imported_mid_batch_switch(
+    base_url: str, mocked_trader: MagicMock, tmp_path: Path, page: Page
+) -> None:
+    """AC4, multi-file case: switching portfolios after the first file in a
+    two-file queue has already completed -- and its write already landed
+    under the locked ``portfolio_id`` -- but before the second file
+    resolves. Distinct from the single-file discard test above, where the
+    switch happens before any response arrives at all: here, a real write
+    has already happened by the time the switch fires, which is the
+    scenario the follow-up review found had no coverage. The discard
+    alert must report both files as already-imported once the queue
+    finishes (the loop runs the second file to completion regardless of
+    the switch -- only the render is discarded, not the in-flight
+    request)."""
+    csv_a = tmp_path / "a.csv"
+    csv_a.write_text(
+        "Date,Symbol,Quantity,Price,Running Balance\n01/01/2024,AAPL,10,100,5000\n",
+        encoding="utf-8",
+    )
+    csv_b = tmp_path / "b.csv"
+    csv_b.write_text(
+        "Date,Symbol,Quantity,Price,Running Balance\n02/01/2024,MSFT,5,200,4000\n",
+        encoding="utf-8",
+    )
+    dialog_messages = _capture_dialogs(page)
+
+    _load_portfolio_tab(page, base_url)
+    _open_import_dropdown(page)
+
+    page.set_input_files("input[type=file]", [str(csv_a), str(csv_b)])
+    page.click("button:has-text('Import CSV')")
+
+    # Switch after the first file's roundtrip has completed (~_IMPORT_DELAY_S)
+    # but before the sequential loop reaches the second file's own
+    # completion (~2x _IMPORT_DELAY_S) -- the window where a write has
+    # already happened but the queue is still in flight.
+    page.wait_for_timeout(int((_IMPORT_DELAY_S + 0.2) * 1000))
+    page.evaluate("window.setActivePortfolio('999')")
+
+    expect(page.locator("#portfolioSelect")).to_be_enabled(
+        timeout=int((_IMPORT_DELAY_S * 2 + 4) * 1000)
+    )
+
+    expect(page.locator("#tab-content [data-import-buy-count]")).to_have_count(0)
+    assert any("2 file(s) were already imported" in m for m in dialog_messages)
 
 
 def test_multi_file_summary_flags_mismatch_without_losing_counts(

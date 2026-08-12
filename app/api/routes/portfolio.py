@@ -348,12 +348,14 @@ async def import_sipp(
         # Never let notification bookkeeping fail an otherwise-successful
         # import (matches AlertAgent's/orchestrator's best-effort pattern).
         logger.exception("Failed to record SIPP import notification")
-    # AD-25: "a rejected or failed plan returns a non-2xx response." Checked
-    # as `!= "ok"` rather than `== "error"` so this also covers Story 1.2's
-    # "rejected" status (handled separately above, before this point is ever
-    # reached) without needing a follow-up change here if that gate's return
-    # path is ever restructured to fall through to this shared return (#210).
-    status_code = 200 if result.status == "ok" else 400
+    # AD-25: "a rejected or failed plan returns a non-2xx response." Mapped
+    # explicitly per known status rather than `!= "ok"` so a status this
+    # dict doesn't recognize is unambiguously a bug (SippImportResult.status
+    # only ever takes these three values) and gets a 500, not a silent 400
+    # that would masquerade as an ordinary client error (#210). "rejected"
+    # is listed for documentation even though that status returns from a
+    # separate branch above, before this point is ever reached.
+    status_code = {"ok": 200, "rejected": 400, "error": 400}.get(result.status, 500)
     return templates.TemplateResponse(
         request, "_portfolio.html", context=context, status_code=status_code
     )

@@ -807,6 +807,14 @@
             skipped: parseInt(banner.getAttribute('data-import-skipped-count'), 10) || 0,
             mismatched: !response.ok,
           });
+        } else if (response.ok) {
+          // A 2xx response with no result banner isn't a failure -- every
+          // known "ok"/"error" path renders one, so this is defensive: a
+          // successful response the summary has nothing to report for is
+          // not the same as a file that failed to import.
+          fileSummaries.push({
+            name: file.name, buys: 0, sells: 0, cash: 0, skipped: 0, mismatched: false,
+          });
         } else {
           const errEl = doc.querySelector('.alert-danger span');
           failures.push(file.name + ': ' + (errEl ? errEl.textContent.trim() : 'import failed'));
@@ -851,15 +859,21 @@
       fileInput.disabled = false;
       if (selectEl) selectEl.disabled = false;
       btn.innerHTML = originalBtnHtml;
-      // Don't silently drop failures this queue already accumulated before
-      // the portfolio changed -- the success/mismatch half is discarded by
-      // design (AC4), but a hard failure (bad CSV, unknown portfolio) is
-      // independent of which portfolio is active and the user should still
-      // hear about it.
-      if (failures.length) {
-        alert('Import discarded (active portfolio changed); some files also failed: '
-          + failures.join('; '));
+      // AC4 discards the *rendered view*, not the writes themselves: every
+      // file already POSTed before the switch was written to the portfolio
+      // this queue was locked to (formData's portfolio_id, captured once,
+      // above), regardless of what's active now. A fully successful queue
+      // must not go silent just because nothing hard-failed -- the user
+      // needs to know data landed somewhere they're no longer looking.
+      const parts = [];
+      if (fileSummaries.length) {
+        parts.push(fileSummaries.length + ' file(s) were already imported '
+          + 'before the active portfolio changed');
       }
+      if (failures.length) {
+        parts.push(failures.length + ' file(s) failed: ' + failures.join('; '));
+      }
+      alert('Import discarded (active portfolio changed). ' + parts.join('; '));
       return false;
     }
     document.getElementById('tab-content').innerHTML = displayHtml;
