@@ -216,6 +216,34 @@ async def import_sipp(
             request, "_portfolio.html", context=context, status_code=400
         )
 
+    if result.status == "rejected":
+        # All-or-nothing commit (#210 follow-up): at least one row failed,
+        # so nothing from this plan was persisted -- never claim buy/sell/
+        # cash counts (there are none), never call get_portfolio (nothing
+        # changed), and surface every failing row/reason instead.
+        context = portfolio.default_portfolio_context(pid)
+        message = "Import rejected — nothing was saved. " + _describe_issues(
+            "row(s) failed", result.failed_rows
+        )
+        context["error_message"] = message
+        try:
+            account = trader.get_portfolio_meta(pid)
+            notifications.record(
+                NotificationCategory.PORTFOLIO,
+                "sipp_import",
+                f"SIPP CSV import rejected — {filename}",
+                severity=NotificationSeverity.ERROR,
+                body=f"{account.name if account else 'account'}: {message}",
+                portfolio_id=pid,
+            )
+        except Exception:
+            # Never let notification bookkeeping fail an otherwise-handled
+            # rejection (matches the success path's best-effort pattern).
+            logger.exception("Failed to record SIPP import rejection notification")
+        return templates.TemplateResponse(
+            request, "_portfolio.html", context=context, status_code=400
+        )
+
     positions = trader.get_portfolio(portfolio_id=pid)
     context = portfolio.portfolio_partial_context(
         positions, cash_balance=result.cash_balance, portfolio_id=pid
@@ -226,6 +254,12 @@ async def import_sipp(
         f"position(s); cash balance £{result.cash_balance:,.2f}."
     )
     warnings = []
+    # As of Story 1.2, a successful (non-"rejected") result from the real
+    # TraderAgent.import_sipp never populates skipped_rows -- every row-level
+    # problem now either rejects the whole plan (failed_rows, handled above)
+    # or is a genuine no-op. This branch is kept live for a future story that
+    # may reintroduce a real "skip" outcome, and for route-level tests that
+    # construct a SippImportResult directly.
     if result.skipped_rows:
         warnings.append(_describe_issues("row(s) skipped", result.skipped_rows))
     if result.parse_errors:
