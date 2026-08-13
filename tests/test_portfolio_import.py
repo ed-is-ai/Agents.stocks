@@ -594,12 +594,24 @@ def test_import_with_no_cash_balance_row_never_shows_a_phantom_zero(
     app.dependency_overrides[get_portfolio_service] = lambda: PortfolioService(trader)
     app.dependency_overrides[get_notifications_repository] = lambda: MagicMock()
     try:
-        _upload(content=_NO_BALANCE_CSV, portfolio_id=pf.id)
+        resp = _upload(content=_NO_BALANCE_CSV, portfolio_id=pf.id)
     finally:
         app.dependency_overrides.clear()
 
+    assert resp.status_code == 200, "import did not reach the success path"
+    assert contexts, "TemplateResponse was never called"
     assert agent.get_cash_balance(pf.id) is None
     assert contexts[-1]["cash_balance"] is None
+    assert "none on record" in contexts[-1]["import_message"]
+    assert "£0.00" not in contexts[-1]["import_message"]
+    # Prove the real template render hides the row too, not just the
+    # context value -- a context-only assertion can't catch a future
+    # regression in the "is not none" gate itself.
+    rendered = templates.get_template("_portfolio.html").render(**contexts[-1])
+    assert (
+        '<span class="fw-bold" style="color:#0f2744; font-size:0.85rem">CASH</span>'
+        not in rendered
+    )
 
 
 def test_reconciliation_route_renders_detected_issue(tmp_path: Path) -> None:
