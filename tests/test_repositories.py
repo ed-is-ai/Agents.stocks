@@ -261,6 +261,71 @@ def test_cash_balances_scoped_per_portfolio_and_currency(trades_connect):
     assert repo.get(2, "GBP") == (Decimal("30.00"), "2024-01-01")
 
 
+def test_cash_balances_list_all_enumerates_every_currency_for_a_portfolio(
+    trades_connect,
+):
+    """Story 1.6, Gate 3: enumerate every currency a portfolio holds a
+    balance in -- ordered by currency, scoped to one portfolio."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    repo = CashBalancesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.upsert_on_connection(conn, 1, "USD", Decimal("50.00"), "2024-01-02")
+        repo.upsert_on_connection(conn, 1, "GBP", Decimal("10.00"), "2024-01-01")
+        repo.upsert_on_connection(conn, 2, "EUR", Decimal("99.00"), "2024-01-01")
+    assert repo.list_all(1) == [
+        ("GBP", Decimal("10.00"), "2024-01-01"),
+        ("USD", Decimal("50.00"), "2024-01-02"),
+    ]
+    assert repo.list_all(2) == [("EUR", Decimal("99.00"), "2024-01-01")]
+    assert repo.list_all(None) == []
+
+
+# --- CashReconciliationRepository (Story 1.5) -------------------------------
+
+
+def test_cash_reconciliation_insert_and_list(trades_connect):
+    from app.repositories.cash_reconciliation_repo import CashReconciliationRepository
+
+    repo = CashReconciliationRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_issue_on_connection(
+            conn, 1, "2024-01-15", 500.0, 550.0, 530.0, -20.0, "REF-1", "GBP"
+        )
+    issues = repo.list_issues(1)
+    assert len(issues) == 1
+    issue = issues[0]
+    assert issue[2] == "2024-01-15"  # date
+    assert issue[3] == 500.0  # prior_balance
+    assert issue[4] == 550.0  # expected_balance
+    assert issue[5] == 530.0  # actual_balance
+    assert issue[6] == -20.0  # difference
+    assert issue[7] == "REF-1"  # row_ref
+    assert issue[8] == "GBP"  # currency
+
+
+def test_cash_reconciliation_list_scoped_per_portfolio_newest_first(trades_connect):
+    from app.repositories.cash_reconciliation_repo import CashReconciliationRepository
+
+    repo = CashReconciliationRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_issue_on_connection(
+            conn, 1, "2024-01-01", 100.0, 110.0, 105.0, -5.0, "R1", "GBP"
+        )
+        repo.insert_issue_on_connection(
+            conn, 1, "2024-02-01", 200.0, 210.0, 205.0, -5.0, "R2", "GBP"
+        )
+        repo.insert_issue_on_connection(
+            conn, 2, "2024-01-01", 300.0, 310.0, 305.0, -5.0, "R3", "GBP"
+        )
+    pf1_issues = repo.list_issues(1)
+    assert [i[7] for i in pf1_issues] == ["R2", "R1"]
+    assert [i[7] for i in repo.list_issues(2)] == ["R3"]
+    assert repo.list_issues(None) == []
+
+
 # --- PriceCacheRepository --------------------------------------------------
 
 

@@ -62,6 +62,11 @@ class SippImportResult(BaseModel):
     failed_rows: list[str] = []
     total_rows: int = 0
     status: Literal["ok", "rejected", "error"] = "ok"
+    # Statement-balance discontinuities detected against intervening cash
+    # movements (Story 1.5, AC5) -- a count only, surfaced immediately
+    # without a second round-trip; the detail lives in the dedicated
+    # reconciliation view (GET /portfolio/{id}/reconciliation).
+    reconciliation_issue_count: int = 0
 
 
 class Portfolio(BaseModel):

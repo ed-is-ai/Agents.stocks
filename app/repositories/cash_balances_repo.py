@@ -30,6 +30,24 @@ class CashBalancesRepository:
             ).fetchone()
         return _row_to_balance(row) if row else None
 
+    def list_all(
+        self, portfolio_id: int | None
+    ) -> list[tuple[str, Decimal, str | None]]:
+        """Return every ``(currency, amount, as_of)`` balance for a
+        portfolio, ordered by currency. ``portfolio_id=None`` returns no
+        rows -- enumeration is only meaningful for a real portfolio,
+        matching ``CashReconciliationRepository.list_issues``'s convention.
+        """
+        if portfolio_id is None:
+            return []
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT currency, amount, as_of FROM cash_balances"
+                " WHERE portfolio_id = ? ORDER BY currency",
+                (portfolio_id,),
+            ).fetchall()
+        return [(row[0], Decimal(row[1]), row[2]) for row in rows]
+
     def get_on_connection(
         self, conn: Any, portfolio_id: int | None, currency: str
     ) -> tuple[Decimal, str | None] | None:

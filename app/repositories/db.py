@@ -96,6 +96,26 @@ CREATE TABLE IF NOT EXISTS cash_balances (
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (portfolio_id, currency)
 );
+CREATE TABLE IF NOT EXISTS cash_reconciliation_issues (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id     INTEGER,
+    date             TEXT NOT NULL,
+    prior_balance    REAL NOT NULL,
+    expected_balance REAL NOT NULL,
+    actual_balance   REAL NOT NULL,
+    difference       REAL NOT NULL,
+    row_ref          TEXT,
+    currency         TEXT NOT NULL DEFAULT 'GBP',
+    detected_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fx_quotes (
+    quote_digest TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    pair         TEXT NOT NULL,
+    as_of        TEXT NOT NULL,
+    rate         TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL
+);
 """
 
 #: Name of the default portfolio existing single-portfolio data migrates into.
@@ -259,6 +279,13 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_snapshots_portfolio "
         "ON portfolio_snapshots(portfolio_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reconciliation_portfolio "
+        "ON cash_reconciliation_issues(portfolio_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fx_quotes_pair_asof ON fx_quotes(pair, as_of)"
     )
 
     for table in ("trades", "cash_flows"):

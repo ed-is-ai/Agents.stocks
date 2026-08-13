@@ -25,6 +25,7 @@ from app.repositories import db
 from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
 from app.repositories.cash_balances_repo import CashBalancesRepository
+from app.repositories.cash_reconciliation_repo import CashReconciliationRepository
 from app.repositories.cash_flows_repo import CashFlowsRepository
 from app.repositories.db import Connect
 from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
@@ -97,6 +98,91 @@ def _idempotency_key(
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _detect_reconciliation_issues(
+    rows: list[dict[str, str]],
+) -> list[tuple[str, str, float, float, float, float, str]]:
+    """Detect statement-balance discontinuities, independently per currency.
+
+    Returns tuples of ``(currency, date, prior_balance, expected_balance,
+    actual_balance, difference, row_ref)`` -- a pure function with no DB
+    side effects; the caller persists whatever it returns.
+
+    Walks ``rows`` in true chronological order (the SIPP export is
+    reverse-chronological -- newest first -- so oldest-to-newest traversal
+    is last-row-to-first-row; see Gate 3's identical assumption). For each
+    currency independently, tracks a running checkpoint balance (the last
+    *observed* Running Balance) and the cumulative credit-minus-debit
+    movement since that checkpoint -- a EUR checkpoint must never
+    reconcile against USD/GBP movements now that Story 1.4 makes balances
+    currency-scoped. Uses its own local ``Money`` parsing, entirely
+    independent of the main row loop's ``parse_errors``/``failed_rows`` --
+    a cell already flagged there must not be flagged here a second time.
+    A row already rejected by the debit+credit contradiction check (AC4)
+    contributes zero net movement here -- its true movement is unknown,
+    not zero; a deliberate, documented limitation, not a bug.
+    """
+
+    def parse(raw: str) -> Money | None:
+        if not raw or raw.strip() in ("", "n/a"):
+            return None
+        try:
+            return parse_money(raw, default_currency="GBP")
+        except MoneyParseError:
+            return None
+
+    issues: list[tuple[str, str, float, float, float, float, str]] = []
+    checkpoint: dict[str, Decimal] = {}
+    movement: dict[str, Decimal] = {}
+
+    for idx in range(len(rows) - 1, -1, -1):
+        row = rows[idx]
+        reference_raw = row.get("Reference", "").strip()
+        reference = (
+            reference_raw if reference_raw and reference_raw.lower() != "n/a" else None
+        )
+        row_label = reference if reference else f"CSV row {idx + 2}"
+        date = _to_iso_date(row.get("Date", "").strip())
+
+        debit_raw = row.get("Debit", "").strip()
+        credit_raw = row.get("Credit", "").strip()
+        contradictory = debit_raw not in ("", "n/a") and credit_raw not in ("", "n/a")
+
+        debit_money = None if contradictory else parse(debit_raw)
+        credit_money = None if contradictory else parse(credit_raw)
+        rb_money = parse(row.get("Running Balance", ""))
+
+        move_source = credit_money or debit_money
+        if move_source is not None:
+            move_currency = move_source.currency
+            delta = (credit_money.amount if credit_money else Decimal("0")) - (
+                debit_money.amount if debit_money else Decimal("0")
+            )
+            movement[move_currency] = movement.get(move_currency, Decimal("0")) + delta
+
+        if rb_money is not None:
+            currency = rb_money.currency
+            actual = rb_money.amount
+            prior = checkpoint.get(currency)
+            if prior is not None:
+                expected = prior + movement.get(currency, Decimal("0"))
+                if abs(actual - expected) > Decimal("0.005"):
+                    issues.append(
+                        (
+                            currency,
+                            date,
+                            float(prior),
+                            float(expected),
+                            float(actual),
+                            float(actual - expected),
+                            row_label,
+                        )
+                    )
+            checkpoint[currency] = actual
+            movement[currency] = Decimal("0")
+
+    return issues
+
+
 class TraderAgent(Agent):
     """Records trades and computes portfolio P&L using average cost basis.
 
@@ -111,6 +197,7 @@ class TraderAgent(Agent):
     _trades: TradesRepository = PrivateAttr()
     _cash_flows: CashFlowsRepository = PrivateAttr()
     _cash_balances: CashBalancesRepository = PrivateAttr()
+    _cash_reconciliation: CashReconciliationRepository = PrivateAttr()
     _price_cache: PriceCacheRepository = PrivateAttr()
     _account: AccountStateRepository = PrivateAttr()
     _artifacts: ArtifactsRepository = PrivateAttr()
@@ -123,6 +210,7 @@ class TraderAgent(Agent):
         self._trades = TradesRepository(connect)
         self._cash_flows = CashFlowsRepository(connect)
         self._cash_balances = CashBalancesRepository(connect)
+        self._cash_reconciliation = CashReconciliationRepository(connect)
         self._price_cache = PriceCacheRepository(connect)
         self._account = AccountStateRepository(connect)
         self._artifacts = ArtifactsRepository()
@@ -727,6 +815,11 @@ class TraderAgent(Agent):
                 "CSV is missing required columns: " + ", ".join(missing)
             )
 
+        # Detection has no DB side effects of its own (Story 1.5, AC5) --
+        # run it once the rows are available, independent of the main
+        # insert loop below. Persisted only if the plan actually commits.
+        reconciliation_issues = _detect_reconciliation_issues(rows)
+
         buy_count, sell_count, cash_count = 0, 0, 0
         inserted_count = duplicate_count = 0
         # A rejected plan never opens a write connection, so its per-row
@@ -787,6 +880,24 @@ class TraderAgent(Agent):
             # point at a specific row instead of a useless "row n/a" for
             # every such row (#185).
             row_label = reference if reference else f"CSV row {idx + 2}"
+
+            # Story 1.5, AC4: both Debit and Credit populated on one row is
+            # contradictory monetary evidence -- reject it outright rather
+            # than silently preferring Debit (today's "BUY" if debit > 0
+            # else "SELL" if credit > 0" always resolves the contradiction
+            # toward Debit). Checked on the raw cell strings, not the parsed
+            # amounts: a parse failure and a blank cell both resolve to
+            # None/0, which would make "populated" indistinguishable from
+            # "genuinely absent".
+            debit_raw = row.get("Debit", "").strip()
+            credit_raw = row.get("Credit", "").strip()
+            if debit_raw not in ("", "n/a") and credit_raw not in ("", "n/a"):
+                failed_rows.append(
+                    f"row {row_label}: contradictory row has both Debit "
+                    f"{debit_raw!r} and Credit {credit_raw!r} populated"
+                )
+                continue
+
             debit_money, debit_marker = parse_field_money(
                 row.get("Debit", ""), "Debit", row_label
             )
@@ -943,10 +1054,23 @@ class TraderAgent(Agent):
                     f"({sorted(marker_currencies)})"
                 )
 
-            if rb_money is not None and rb_money.amount > 0:
+            # Story 1.5, AC1/AC2: a genuine zero/negative closing balance
+            # must win the rank exactly like a positive one -- gate on
+            # whether the cell parsed successfully (rb_money is not None),
+            # never on its sign. A cell that fails to parse already added
+            # its own failed_rows entry in parse_field_money above and
+            # never reaches here as a fabricated 0.0.
+            if rb_money is not None:
                 rb_currency = rb_money.currency
                 is_iso = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date))
-                rank = (1 if is_iso else 0, date if is_iso else "", idx)
+                # Reverse-chronological same-day tie-break (PRD §10 / FR-9):
+                # the first-listed row for a given Date is the most recent
+                # transaction of that day. Negating idx makes the smaller
+                # original index (the first-listed row) produce the larger
+                # rank value and win the tie -- the date components still
+                # dominate the comparison, so cross-date ordering is
+                # unaffected; only the within-same-date direction changes.
+                rank = (1 if is_iso else 0, date if is_iso else "", -idx)
                 existing_rank = cash_balance_rank.get(rb_currency)
                 if existing_rank is None or rank > existing_rank:
                     cash_balance_rank[rb_currency] = rank
@@ -1018,6 +1142,27 @@ class TraderAgent(Agent):
                 inserted_count += 1
                 cash_count += 1
 
+            for (
+                currency,
+                date,
+                prior,
+                expected,
+                actual,
+                difference,
+                row_ref,
+            ) in reconciliation_issues:
+                self._cash_reconciliation.insert_issue_on_connection(
+                    conn,
+                    portfolio_id,
+                    date,
+                    prior,
+                    expected,
+                    actual,
+                    difference,
+                    row_ref,
+                    currency,
+                )
+
             # Every currency with a winning Running Balance row joins the
             # new per-currency cash_balances table (AD-24), each guarded by
             # the #160 stale-date check independently.
@@ -1032,7 +1177,10 @@ class TraderAgent(Agent):
             # not migrated onto cash_balances by this story.
             gbp_balance = cash_balance.get("GBP")
             gbp_candidate = float(gbp_balance) if gbp_balance is not None else 0.0
-            if gbp_balance is not None and gbp_balance > 0:
+            # Story 1.5, AC1/AC2: test whether a winner was found at all
+            # (gbp_balance is not None), never its sign -- a winning 0.0 or
+            # negative balance must still be applied.
+            if gbp_balance is not None:
                 gbp_rank = cash_balance_rank.get("GBP")
                 cash_asof = (
                     gbp_rank[1] if gbp_rank is not None and gbp_rank[0] == 1 else None
@@ -1106,6 +1254,7 @@ class TraderAgent(Agent):
             failed_rows=[],
             total_rows=total_rows,
             status=status,
+            reconciliation_issue_count=len(reconciliation_issues),
         )
 
     def save_price_cache(
@@ -1199,13 +1348,14 @@ class TraderAgent(Agent):
         SIPP file after a newer one must not regress the balance to a stale
         date. We persist the balance's as-of date alongside it and only replace
         when the incoming date is newer-or-equal (ties → the newer import wins).
-        An incoming balance with no parseable date can't be compared, so it
-        overwrites — matching the pre-#160 behaviour for undated files.
+        An incoming balance with no parseable date overwrites only when
+        nothing dated is already stored (Story 1.5, AC3) — it can never be
+        compared against a stored date, so it must not blindly win over one.
         """
         stored_date = self._account.get_on_connection(
             conn, self._cash_date_key(portfolio_id)
         )
-        if as_of is None or stored_date is None or as_of >= stored_date:
+        if stored_date is None or (as_of is not None and as_of >= stored_date):
             self._account.set_on_connection(
                 conn, self._cash_key(portfolio_id), str(amount)
             )
@@ -1224,15 +1374,17 @@ class TraderAgent(Agent):
         """Persist each currency's winning Running Balance to
         ``cash_balances``, applying the #160 stale-date guard independently
         per currency (AD-24: "per-currency balance state" joins the same
-        one-transaction commit as the import's trade/cash-flow writes).
-        Writes on the caller's open connection; does not commit.
+        one-transaction commit as the import's trade/cash-flow writes). An
+        undated incoming balance overwrites only when nothing dated is
+        already stored for that currency (Story 1.5, AC3). Writes on the
+        caller's open connection; does not commit.
         """
         for currency, amount in cash_balance.items():
             rank = cash_balance_rank[currency]
             as_of = rank[1] if rank[0] == 1 else None
             stored = self._cash_balances.get_on_connection(conn, portfolio_id, currency)
             stored_date = stored[1] if stored else None
-            if as_of is None or stored_date is None or as_of >= stored_date:
+            if stored_date is None or (as_of is not None and as_of >= stored_date):
                 self._cash_balances.upsert_on_connection(
                     conn, portfolio_id, currency, amount, as_of
                 )
@@ -1281,6 +1433,20 @@ class TraderAgent(Agent):
     ) -> list[tuple[Any, ...]]:
         """Return a portfolio's value-history snapshots, oldest-first."""
         return self._snapshots.history(portfolio_id, limit)
+
+    def list_reconciliation_issues(
+        self, portfolio_id: int | None, limit: int = 200
+    ) -> list[tuple[Any, ...]]:
+        """Return a portfolio's recorded cash-reconciliation issues,
+        newest-first (Story 1.5, AC5)."""
+        return self._cash_reconciliation.list_issues(portfolio_id, limit)
+
+    def list_cash_balances(
+        self, portfolio_id: int | None
+    ) -> list[tuple[str, Decimal, str | None]]:
+        """Return every ``(currency, amount, as_of)`` balance for a
+        portfolio (Story 1.6, Gate 3)."""
+        return self._cash_balances.list_all(portfolio_id)
 
     def refresh_portfolio_prices(
         self,
