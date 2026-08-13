@@ -61,6 +61,11 @@ class TraderService:
         newest-first (Story 1.5, AC5)."""
         return self._agent.list_reconciliation_issues(portfolio_id, limit)
 
+    def list_cash_balances(self, portfolio_id: int | None) -> list[Any]:
+        """Return every ``(currency, amount, as_of)`` balance for a
+        portfolio (Story 1.6, Gate 3)."""
+        return self._agent.list_cash_balances(portfolio_id)
+
     # --- reads ------------------------------------------------------------
 
     def get_portfolio(
