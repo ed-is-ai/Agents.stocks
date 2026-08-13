@@ -60,6 +60,20 @@ so that I can leave the page and return without losing or duplicating work.
   - [x] Preserve import-graph tests proving no backtest lifecycle/engine/worker module imports live portfolio, trade, cash, `TraderAgent`, order submission, or notification authority.
   - [x] Run focused Backtest tests, Ruff/format/Pyrefly on touched files, then the complete repository suite.
 
+### Review Findings
+
+- [ ] [Review][Patch] Validate the complete current qualification contract and bind enqueue validation atomically [app/services/backtest/strategy_job_service.py:60]
+- [ ] [Review][Patch] Dispatch claimed work by its typed job type instead of sending every FIFO entry to the initialization factory [app/services/backtest/worker.py:79]
+- [ ] [Review][Patch] Convert worker construction failures into their stable lifecycle failure instead of `worker_interrupted` [app/services/backtest/worker.py:88]
+- [ ] [Review][Patch] Preserve `calendar_error` when calendar resolution fails [app/services/backtest/historical_initialization_engine.py:127]
+- [ ] [Review][Patch] Resolve cancellation/version races at the failure boundary without overwriting cancellation intent as `worker_interrupted` [app/services/backtest/historical_initialization_engine.py:461]
+- [ ] [Review][Patch] Prevent reconciled or unterminated stale children from publishing snapshot months after losing their claim [app/services/backtest/historical_initialization_engine.py:150]
+- [ ] [Review][Patch] Keep the dispatcher alive after a transient polling or repository exception [app/services/backtest/strategy_job_service.py:135]
+- [ ] [Review][Patch] Close the SQLite trigger hole that permits standalone or arbitrary `status_version` changes [app/repositories/backtest_repo.py:454]
+- [ ] [Review][Patch] Add the specified strict submission, cancellation, progress, and failure contracts instead of untyped service configuration [app/services/backtest/strategy_job_service.py:60]
+- [ ] [Review][Patch] Replace stubbed or call-only assertions with integration coverage for real no-op readiness, retained committed months, and every cancellation boundary [tests/backtest/test_strategy_job_repository.py:354]
+- [ ] [Review][Patch] Disable real Strategy Manager startup before module-scoped application fixtures rather than in a later function-scoped fixture [tests/conftest.py:11]
+
 ## Dev Notes
 
 ### Scope Boundary
