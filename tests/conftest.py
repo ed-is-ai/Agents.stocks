@@ -22,6 +22,9 @@ def isolate_notifications_db(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.core.config.POSITION_STATE_DB", tmp_path / "position_state.db"
     )
+    # Global FastAPI tests must never launch a real Strategy Manager child.
+    # Dedicated lifespan tests opt in explicitly with an injected fake.
+    monkeypatch.setenv("STRATEGY_MANAGER_WORKER_ENABLED", "false")
 
 
 @pytest.fixture
