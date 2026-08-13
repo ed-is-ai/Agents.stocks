@@ -49,6 +49,7 @@ from app.services.backtest.source_manifest import (
     yfinance_ingestion_source_manifest,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.trading_calendar import CalendarContractError
 
 from app.services.backtest.strategy_job import (
     InitializationRunV1,
@@ -88,6 +89,7 @@ class CanonicalSnapshotMonthProcessor:
         self,
         *,
         job_id: str,
+        claim_token: str,
         profile: SnapshotProfileV1,
         roster: CapturedRosterV1,
         backtest_repository: BacktestRepository,
@@ -101,6 +103,7 @@ class CanonicalSnapshotMonthProcessor:
         if profile.roster_digest != roster.roster_digest:
             raise ValueError("snapshot profile and reconstruction roster differ")
         self._job_id = job_id
+        self._claim_token = claim_token
         self._profile = profile
         self._roster = roster
         self._backtest_repository = backtest_repository
@@ -154,7 +157,9 @@ class CanonicalSnapshotMonthProcessor:
                     member.provider_data_revision,
                 )
             self._backtest_repository.commit_snapshot_month(
-                commit, self._price_repository
+                commit,
+                self._price_repository,
+                job_claim=(self._job_id, self._claim_token),
             )
         except InitializationMonthError:
             raise
@@ -165,6 +170,11 @@ class CanonicalSnapshotMonthProcessor:
         except ReconstructionError as exc:
             raise InitializationMonthError(
                 JobFailureCode(exc.code), exc.detail
+            ) from exc
+        except CalendarContractError as exc:
+            raise InitializationMonthError(
+                JobFailureCode.CALENDAR_ERROR,
+                "Historical calendar could not resolve the requested month",
             ) from exc
         except (BacktestIntegrityError, SnapshotContractError) as exc:
             code = getattr(exc, "code", "integrity_error")
@@ -402,7 +412,7 @@ class HistoricalInitializationEngine:
             return job
         initialization = self._repository.initialization_run(job_id)
         if job.job_type not in {StrategyJobType.INITIALIZATION, "initialization"}:
-            return self._fail(
+            return self._fail_or_cancel(
                 job,
                 claim_token,
                 JobFailureCode.INTEGRITY_ERROR,
@@ -410,7 +420,7 @@ class HistoricalInitializationEngine:
                 "Worker job type does not match initialization",
             )
         if not self._qualification_check():
-            return self._fail(
+            return self._fail_or_cancel(
                 job,
                 claim_token,
                 JobFailureCode.PROVIDER_CONTRACT_ERROR,
@@ -418,7 +428,7 @@ class HistoricalInitializationEngine:
                 "Historical data contract is not qualified",
             )
         if not self._profile_check(initialization.profile_hash):
-            return self._fail(
+            return self._fail_or_cancel(
                 job,
                 claim_token,
                 JobFailureCode.INTEGRITY_ERROR,
@@ -462,12 +472,14 @@ class HistoricalInitializationEngine:
                 current = self._repository.strategy_job(job_id)
                 if not self._owns(current, claim_token):
                     return current
-                return self._fail(current, claim_token, exc.code, month, exc.detail)
+                return self._fail_or_cancel(
+                    current, claim_token, exc.code, month, exc.detail
+                )
             except Exception:
                 current = self._repository.strategy_job(job_id)
                 if not self._owns(current, claim_token):
                     return current
-                return self._fail(
+                return self._fail_or_cancel(
                     current,
                     claim_token,
                     JobFailureCode.INTEGRITY_ERROR,
@@ -513,6 +525,33 @@ class HistoricalInitializationEngine:
             failed_month=failed_month,
             detail=detail,
         )
+
+    def _fail_or_cancel(
+        self,
+        job: StrategyJobV1,
+        claim_token: str,
+        code: JobFailureCode,
+        failed_month: str | None,
+        detail: str,
+    ) -> StrategyJobV1:
+        try:
+            if job.cancel_requested_at is not None:
+                return self._repository.cancel_claimed_strategy_job(
+                    job.id, claim_token, expected_version=job.status_version
+                )
+            return self._fail(job, claim_token, code, failed_month, detail)
+        except StrategyJobConflict:
+            current = self._repository.strategy_job(job.id)
+            if (
+                self._owns(current, claim_token)
+                and current.cancel_requested_at is not None
+            ):
+                return self._repository.cancel_claimed_strategy_job(
+                    current.id,
+                    claim_token,
+                    expected_version=current.status_version,
+                )
+            return current
 
     @staticmethod
     def _owns(job, claim_token: str) -> bool:

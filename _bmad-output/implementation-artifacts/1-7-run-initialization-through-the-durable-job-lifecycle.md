@@ -5,7 +5,7 @@ github_issue: 190
 
 # Story 1.7: Run Initialization Through the Durable Job Lifecycle
 
-Status: review
+Status: done
 
 ## Story
 
@@ -62,17 +62,17 @@ so that I can leave the page and return without losing or duplicating work.
 
 ### Review Findings
 
-- [ ] [Review][Patch] Validate the complete current qualification contract and bind enqueue validation atomically [app/services/backtest/strategy_job_service.py:60]
-- [ ] [Review][Patch] Dispatch claimed work by its typed job type instead of sending every FIFO entry to the initialization factory [app/services/backtest/worker.py:79]
-- [ ] [Review][Patch] Convert worker construction failures into their stable lifecycle failure instead of `worker_interrupted` [app/services/backtest/worker.py:88]
-- [ ] [Review][Patch] Preserve `calendar_error` when calendar resolution fails [app/services/backtest/historical_initialization_engine.py:127]
-- [ ] [Review][Patch] Resolve cancellation/version races at the failure boundary without overwriting cancellation intent as `worker_interrupted` [app/services/backtest/historical_initialization_engine.py:461]
-- [ ] [Review][Patch] Prevent reconciled or unterminated stale children from publishing snapshot months after losing their claim [app/services/backtest/historical_initialization_engine.py:150]
-- [ ] [Review][Patch] Keep the dispatcher alive after a transient polling or repository exception [app/services/backtest/strategy_job_service.py:135]
-- [ ] [Review][Patch] Close the SQLite trigger hole that permits standalone or arbitrary `status_version` changes [app/repositories/backtest_repo.py:454]
-- [ ] [Review][Patch] Add the specified strict submission, cancellation, progress, and failure contracts instead of untyped service configuration [app/services/backtest/strategy_job_service.py:60]
-- [ ] [Review][Patch] Replace stubbed or call-only assertions with integration coverage for real no-op readiness, retained committed months, and every cancellation boundary [tests/backtest/test_strategy_job_repository.py:354]
-- [ ] [Review][Patch] Disable real Strategy Manager startup before module-scoped application fixtures rather than in a later function-scoped fixture [tests/conftest.py:11]
+- [x] [Review][Patch] Validate the complete current qualification contract and bind enqueue validation atomically [app/services/backtest/strategy_job_service.py:60]
+- [x] [Review][Patch] Dispatch claimed work by its typed job type instead of sending every FIFO entry to the initialization factory [app/services/backtest/worker.py:79]
+- [x] [Review][Patch] Convert worker construction failures into their stable lifecycle failure instead of `worker_interrupted` [app/services/backtest/worker.py:88]
+- [x] [Review][Patch] Preserve `calendar_error` when calendar resolution fails [app/services/backtest/historical_initialization_engine.py:127]
+- [x] [Review][Patch] Resolve cancellation/version races at the failure boundary without overwriting cancellation intent as `worker_interrupted` [app/services/backtest/historical_initialization_engine.py:461]
+- [x] [Review][Patch] Prevent reconciled or unterminated stale children from publishing snapshot months after losing their claim [app/services/backtest/historical_initialization_engine.py:150]
+- [x] [Review][Patch] Keep the dispatcher alive after a transient polling or repository exception [app/services/backtest/strategy_job_service.py:135]
+- [x] [Review][Patch] Close the SQLite trigger hole that permits standalone or arbitrary `status_version` changes [app/repositories/backtest_repo.py:454]
+- [x] [Review][Patch] Add the specified strict submission, cancellation, progress, and failure contracts instead of untyped service configuration [app/services/backtest/strategy_job_service.py:60]
+- [x] [Review][Patch] Replace stubbed or call-only assertions with integration coverage for real no-op readiness, retained committed months, and every cancellation boundary [tests/backtest/test_strategy_job_repository.py:354]
+- [x] [Review][Patch] Disable real Strategy Manager startup before module-scoped application fixtures rather than in a later function-scoped fixture [tests/conftest.py:11]
 
 ## Dev Notes
 
@@ -142,6 +142,8 @@ Codex (GPT-5)
 - Added qualified asynchronous enqueue, exact argv subprocess dispatch, startup reconciliation, child-exit/shutdown fallback, and FastAPI lifespan ownership without coupling to BAU scanning.
 - Added deterministic month/member orchestration over the existing yfinance evidence, reconstruction, cache, exclusion-proof, and Story 1.6 commit boundaries; cached evidence is revalidated before reuse.
 - Added focused durability, concurrency, cancellation, fail-fast, cache reuse, worker, lifespan, and import-boundary coverage. No Story 1.8 recovery/outbox, Story 1.9 route/UI, notification, or live portfolio authority was added.
+- Applied all accepted adversarial-review patches: qualification identity is transactionally pinned, dispatch and worker failures are typed, stale claims cannot publish, cancellation races preserve intent, lifecycle versions are trigger-enforced, and dispatcher/test startup boundaries are resilient.
+- Final review validation: 57 focused review tests passed; 4 localhost browser tests passed; Ruff and Pyrefly passed on touched files; the complete repository suite passed with 1,067 tests.
 
 ### File List
 
@@ -163,6 +165,7 @@ Codex (GPT-5)
 - `tests/backtest/test_historical_data_qualification.py`
 - `tests/backtest/test_historical_initialization_engine.py`
 - `tests/backtest/test_historical_price_repository.py`
+- `tests/backtest/test_snapshot_coverage_repository.py`
 - `tests/backtest/test_strategy_job_repository.py`
 - `tests/backtest/test_strategy_job_service.py`
 - `tests/backtest/test_strategy_manager_lifespan.py`
@@ -171,3 +174,4 @@ Codex (GPT-5)
 ## Change Log
 
 - 2026-08-13: Implemented and validated the durable historical-initialization job lifecycle; moved Story 1.7 to review.
+- 2026-08-13: Applied all accepted code-review patches, passed the complete 1,067-test repository suite, and moved Story 1.7 to done.

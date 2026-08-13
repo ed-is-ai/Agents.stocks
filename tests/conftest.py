@@ -2,10 +2,16 @@
 Test configuration and fixtures for stock agent tests.
 """
 
+import os
+
 import pytest
 import pandas as pd
 
 from app.schemas import StockRecord, StockAnalysis, StockScan
+
+# Set before test modules create module-scoped FastAPI servers. The autouse
+# fixture below keeps per-test monkeypatch isolation as well.
+os.environ.setdefault("STRATEGY_MANAGER_WORKER_ENABLED", "false")
 
 
 @pytest.fixture(autouse=True)

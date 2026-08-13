@@ -7,23 +7,27 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import logging
 from typing import Callable, Protocol
 
 from app.core.config import ROOT_DIR
-from app.services.backtest.historical_data_qualification import (
-    current_source_versions_json,
-)
 from app.services.backtest.strategy_job import (
+    InitializationSubmissionV1,
     JobFailureCode,
     StrategyJobConflict,
     StrategyJobStatus,
+    StrategyJobCancellationV1,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessLike(Protocol):
     def poll(self) -> int | None: ...
 
     def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
 
     def wait(self, timeout: float | None = None) -> int | None: ...
 
@@ -44,37 +48,33 @@ class StrategyJobService:
         *,
         popen: Callable[..., ProcessLike] = subprocess.Popen,
         project_root: Path = ROOT_DIR,
-        qualification_check: Callable[[], bool] | None = None,
+        qualification_digest: Callable[[], str | None] | None = None,
     ) -> None:
         self._repository = repository
         self._popen = popen
         self._project_root = project_root
-        self._qualification_check = (
-            qualification_check or self._qualification_is_current
+        self._qualification_digest = qualification_digest or (
+            lambda: self._repository.current_qualification_contract_digest()
         )
         self._owned: _OwnedChild | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def enqueue_initialization(self, **configuration):
-        if not self._qualification_check():
+    def enqueue_initialization(self, submission: InitializationSubmissionV1):
+        qualification_digest = self._qualification_digest()
+        if qualification_digest is None:
             raise StrategyJobConflict(
                 "historical data contract is not currently qualified"
             )
-        return self._repository.create_initialization_job(**configuration)
-
-    def _qualification_is_current(self) -> bool:
-        result = self._repository.latest_recorded_qualification()
-        return bool(
-            result is not None
-            and result.passed
-            and result.source_versions_json == current_source_versions_json()
+        return self._repository.create_initialization_job(
+            **submission.model_dump(),
+            qualification_contract_digest=qualification_digest,
         )
 
-    def request_cancellation(self, job_id: str, *, expected_version: int):
+    def request_cancellation(self, request: StrategyJobCancellationV1):
         return self._repository.request_strategy_job_cancellation(
-            job_id, expected_version=expected_version
+            request.job_id, expected_version=request.expected_version
         )
 
     def reconcile_startup(self):
@@ -134,7 +134,10 @@ class StrategyJobService:
 
     def _dispatch_loop(self, poll_interval: float) -> None:
         while not self._stop.wait(poll_interval):
-            self.dispatch_once()
+            try:
+                self.dispatch_once()
+            except Exception:
+                logger.exception("Strategy job dispatcher iteration failed")
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -150,7 +153,11 @@ class StrategyJobService:
                 try:
                     owned.process.wait(timeout=5)
                 except Exception:
-                    pass
+                    owned.process.kill()
+                    owned.process.wait(timeout=5)
+            if owned.process.poll() is None:
+                logger.error("Strategy worker did not stop during shutdown")
+                return
             self._fallback_if_nonterminal(owned, "Worker interrupted by shutdown")
 
     def _fallback_if_nonterminal(self, owned: _OwnedChild, detail: str) -> None:

@@ -3,11 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+import threading
 
 import pytest
 
 from app.services.backtest.strategy_job_service import StrategyJobService
-from app.services.backtest.strategy_job import JobFailureCode, StrategyJobConflict
+from app.services.backtest.strategy_job import (
+    InitializationSubmissionV1,
+    JobFailureCode,
+    StrategyJobConflict,
+)
 
 
 @dataclass
@@ -55,6 +60,7 @@ class FakeProcess:
         self.returncode = returncode
         self.terminated = False
         self.waited = False
+        self.killed = False
 
     def poll(self):
         return self.returncode
@@ -66,6 +72,10 @@ class FakeProcess:
     def wait(self, timeout=None):
         self.waited = True
         return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
 
 
 def test_dispatch_spawns_exact_module_worker_without_shell_or_pipes() -> None:
@@ -144,17 +154,80 @@ def test_shutdown_terminates_only_owned_child_and_marks_interrupted() -> None:
 
 def test_enqueue_requires_current_qualification_before_repository_write() -> None:
     repo = FakeRepository(None)
-    service = StrategyJobService(repo, qualification_check=lambda: False)
+    service = StrategyJobService(repo, qualification_digest=lambda: None)
 
     with pytest.raises(StrategyJobConflict):
-        service.enqueue_initialization(profile_hash="a" * 64)
+        service.enqueue_initialization(
+            InitializationSubmissionV1(
+                profile_hash="a" * 64,
+                requested_start="2026-05",
+                requested_end="2026-05",
+                calendar_dataset_version="exchange-calendars-v1",
+            )
+        )
 
     assert repo.created == []
 
 
 def test_qualified_enqueue_returns_without_running_the_worker_inline() -> None:
     repo = FakeRepository(None)
-    service = StrategyJobService(repo, qualification_check=lambda: True)
+    service = StrategyJobService(repo, qualification_digest=lambda: "b" * 64)
 
-    assert service.enqueue_initialization(profile_hash="a" * 64) == "queued"
-    assert repo.created == [{"profile_hash": "a" * 64}]
+    submission = InitializationSubmissionV1(
+        profile_hash="a" * 64,
+        requested_start="2026-05",
+        requested_end="2026-05",
+        calendar_dataset_version="exchange-calendars-v1",
+    )
+    assert service.enqueue_initialization(submission) == "queued"
+    assert repo.created == [
+        {
+            **submission.model_dump(),
+            "qualification_contract_digest": "b" * 64,
+        }
+    ]
+
+
+def test_dispatch_loop_survives_one_repository_error() -> None:
+    repo = FakeRepository(None)
+    service = StrategyJobService(repo)
+    calls = 0
+
+    def dispatch() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient")
+        service._stop.set()
+        return False
+
+    service.dispatch_once = dispatch  # type: ignore[method-assign]
+    thread = threading.Thread(target=service._dispatch_loop, args=(0.001,))
+    thread.start()
+    thread.join(timeout=1)
+
+    assert calls == 2
+
+
+def test_shutdown_kills_child_after_graceful_wait_failure() -> None:
+    class StubbornProcess(FakeProcess):
+        def wait(self, timeout=None):
+            self.waited = True
+            if not self.killed:
+                raise TimeoutError("still running")
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+
+    repo = FakeRepository(FakeClaim(FakeJob("job-1", 2), "claim-1"))
+    process = StubbornProcess()
+    service = StrategyJobService(
+        repo, popen=lambda *_a, **_k: process, project_root=Path("/project")
+    )
+    service.dispatch_once()
+
+    service.shutdown()
+
+    assert process.terminated and process.killed
+    assert len(repo.failed) == 1

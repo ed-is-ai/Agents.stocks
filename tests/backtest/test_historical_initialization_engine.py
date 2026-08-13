@@ -21,6 +21,8 @@ from app.services.backtest.reconstruction_roster import (
     CapturedRosterV1,
 )
 from app.services.backtest.strategy_job import JobFailureCode, StrategyJobStatus
+from app.services.backtest.strategy_job import StrategyJobConflict
+from app.services.backtest.trading_calendar import CalendarContractError
 
 
 class Status(StrEnum):
@@ -47,6 +49,7 @@ class Initialization:
     requested_start: str = "2026-05"
     requested_end: str = "2026-07"
     requested_months: tuple[str, ...] = ("2026-05", "2026-06", "2026-07")
+    qualification_contract_digest: str = "b" * 64
 
 
 class FakeRepository:
@@ -162,6 +165,24 @@ def test_cancellation_is_honoured_before_next_month_boundary() -> None:
     assert repo.cancelled is True
 
 
+def test_preexisting_cancel_intent_stops_before_first_month() -> None:
+    repo = FakeRepository()
+    repo.job = replace(
+        repo.job,
+        cancel_requested_at=object(),
+        status_version=repo.job.status_version + 1,
+    )
+    processed: list[str] = []
+
+    result = HistoricalInitializationEngine(
+        cast(InitializationRepository, repo), processed.append
+    ).run("job-1", "claim-1")
+
+    assert result.status is StrategyJobStatus.CANCELLED
+    assert processed == []
+    assert repo.progress == []
+
+
 def test_wrong_claim_is_rejected_without_processing() -> None:
     repo = FakeRepository()
     processed: list[str] = []
@@ -260,6 +281,52 @@ def test_cached_evidence_is_reused_without_provider_access() -> None:
     )
 
     assert processor._evidence_for(roster_member, request) is cached
+
+
+def test_calendar_contract_failure_keeps_calendar_failure_code() -> None:
+    processor = object.__new__(CanonicalSnapshotMonthProcessor)
+    setattr(processor, "_clock", lambda: datetime(2026, 8, 12, tzinfo=timezone.utc))
+    setattr(processor, "_roster", SimpleNamespace(members=()))
+    setattr(
+        processor,
+        "_calendar",
+        SimpleNamespace(
+            month_sessions=lambda *_a, **_k: (_ for _ in ()).throw(
+                CalendarContractError("bad calendar")
+            )
+        ),
+    )
+
+    with pytest.raises(InitializationMonthError) as error:
+        processor("2026-07")
+
+    assert error.value.code is JobFailureCode.CALENDAR_ERROR
+
+
+def test_cancel_intent_wins_version_race_at_failure_boundary() -> None:
+    class RacingRepository(FakeRepository):
+        def fail_claimed_strategy_job(self, _job_id, _token, **kwargs):
+            self.job = replace(
+                self.job,
+                cancel_requested_at=object(),
+                status_version=self.job.status_version + 1,
+            )
+            raise StrategyJobConflict("cancellation won")
+
+    repo = RacingRepository()
+
+    def process(_month: str) -> None:
+        raise InitializationMonthError(
+            JobFailureCode.REQUIRED_DATA_MISSING,
+            "Required historical data is unavailable",
+        )
+
+    result = HistoricalInitializationEngine(
+        cast(InitializationRepository, repo), process
+    ).run("job-1", "claim-1")
+
+    assert result.status is StrategyJobStatus.CANCELLED
+    assert repo.cancelled is True
 
 
 def test_strategy_lifecycle_modules_do_not_import_live_trading_authority() -> None:

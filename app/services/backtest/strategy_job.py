@@ -118,6 +118,7 @@ class InitializationRunV1(_LifecycleModel):
     requested_months: tuple[Month, ...]
     requested_month_digest: Digest
     calendar_dataset_version: Annotated[str, Field(min_length=1)]
+    qualification_contract_digest: Digest
     ordered_month_digest: Digest | None = None
 
     @model_validator(mode="after")
@@ -177,6 +178,40 @@ class InitializationEnqueueResultV1(_LifecycleModel):
         return self
 
 
+class InitializationSubmissionV1(_LifecycleModel):
+    profile_hash: Digest
+    requested_start: Month
+    requested_end: Month
+    calendar_dataset_version: Annotated[str, Field(min_length=1)]
+    parent_job_id: str | None = None
+
+    @model_validator(mode="after")
+    def _closed_range(self) -> "InitializationSubmissionV1":
+        TradingCalendar.months_inclusive(self.requested_start, self.requested_end)
+        return self
+
+
+class StrategyJobCancellationV1(_LifecycleModel):
+    job_id: Annotated[str, Field(min_length=1)]
+    expected_version: Annotated[int, Field(gt=0)]
+
+
+class StrategyJobProgressV1(_LifecycleModel):
+    job_id: Annotated[str, Field(min_length=1)]
+    claim_token: Annotated[str, Field(min_length=1)]
+    expected_version: Annotated[int, Field(gt=0)]
+    month: Month
+
+
+class StrategyJobFailureV1(_LifecycleModel):
+    job_id: Annotated[str, Field(min_length=1)]
+    claim_token: Annotated[str, Field(min_length=1)]
+    expected_version: Annotated[int, Field(gt=0)]
+    failure_code: JobFailureCode
+    failed_month: Month | None = None
+    detail: Annotated[str, Field(min_length=1, max_length=500)]
+
+
 def requested_month_digest(
     profile_hash: str, months: tuple[str, ...], calendar_dataset_version: str
 ) -> str:
@@ -194,11 +229,15 @@ __all__ = [
     "ClaimedStrategyJobV1",
     "InitializationEnqueueResultV1",
     "InitializationRunV1",
+    "InitializationSubmissionV1",
     "JobFailureCode",
     "StrategyJobConflict",
+    "StrategyJobCancellationV1",
     "StrategyJobError",
     "StrategyJobNotFound",
     "StrategyJobStatus",
+    "StrategyJobFailureV1",
+    "StrategyJobProgressV1",
     "StrategyJobType",
     "StrategyJobV1",
     "requested_month_digest",

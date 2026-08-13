@@ -3,16 +3,24 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
+import json
 import sqlite3
 
 import pytest
 
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.backtest_repo import QualificationResult
 from app.services.backtest.strategy_job import (
     JobFailureCode,
     StrategyJobConflict,
     StrategyJobStatus,
+)
+from app.services.backtest.canonical_manifest import manifest_digest
+from app.services.backtest.historical_data_qualification import (
+    FIXTURE_CONTRACT_VERSION,
+    REQUEST_CONTRACT_VERSION,
+    current_source_versions_json,
 )
 from app.services.backtest.snapshot_profile import IntervalReadinessV1
 from app.services.backtest.trading_calendar import TradingCalendar
@@ -21,6 +29,21 @@ from app.services.backtest.trading_calendar import TradingCalendar
 NOW = datetime(2026, 8, 12, 9, 30, tzinfo=timezone.utc)
 PROFILE_HASH = "a" * 64
 ROSTER_DIGEST = "b" * 64
+FIXTURE_DIGEST = "1" * 64
+PROBE_DEFINITION_DIGEST = "2" * 64
+
+
+def _qualification_digest() -> str:
+    return manifest_digest(
+        {
+            "sources": json.loads(current_source_versions_json()),
+            "calendar_digest": TradingCalendar().session_table_digest(),
+            "request_contract": REQUEST_CONTRACT_VERSION,
+            "fixture_contract": FIXTURE_CONTRACT_VERSION,
+            "fixture_digest": FIXTURE_DIGEST,
+            "probe_definition_digest": PROBE_DEFINITION_DIGEST,
+        }
+    )
 
 
 def _repo(path: Path) -> BacktestRepository:
@@ -72,6 +95,22 @@ def _seed_profile(path: Path) -> None:
                VALUES (1, ?, 1, ?)""",
             (PROFILE_HASH, NOW.isoformat()),
         )
+        digest = _qualification_digest()
+        conn.execute(
+            """INSERT OR IGNORE INTO historical_source_qualifications (
+                   contract_digest, source_versions_json, fixture_digest,
+                   probe_definition_digest, probe_digest, qualified_at, passed,
+                   failure_code, failure_reason
+               ) VALUES (?, ?, ?, ?, ?, ?, 1, NULL, NULL)""",
+            (
+                digest,
+                current_source_versions_json(),
+                FIXTURE_DIGEST,
+                PROBE_DEFINITION_DIGEST,
+                "3" * 64,
+                NOW.isoformat(),
+            ),
+        )
 
 
 def _enqueue(repo: BacktestRepository, start: str = "2026-05", end: str = "2026-07"):
@@ -80,6 +119,7 @@ def _enqueue(repo: BacktestRepository, start: str = "2026-05", end: str = "2026-
         requested_start=start,
         requested_end=end,
         calendar_dataset_version="exchange-calendars-v1",
+        qualification_contract_digest=_qualification_digest(),
     )
 
 
@@ -408,8 +448,52 @@ def test_database_rejects_initialization_subtype_for_backtest_placeholder(
                 """INSERT INTO initialization_runs (
                        job_id, profile_hash, requested_start, requested_end,
                        requested_months_json, requested_month_digest,
-                       calendar_dataset_version
+                       calendar_dataset_version, qualification_contract_digest
                    ) VALUES ('backtest-1', ?, '2026-05', '2026-05', '["2026-05"]',
-                             ?, 'exchange-calendars-v1')""",
-                (PROFILE_HASH, "f" * 64),
+                             ?, 'exchange-calendars-v1', ?)""",
+                (PROFILE_HASH, "f" * 64, _qualification_digest()),
             )
+
+
+def test_enqueue_rechecks_latest_qualification_inside_creation_transaction(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    repo.record_qualification(
+        QualificationResult(
+            contract_digest=_qualification_digest(),
+            source_versions_json=current_source_versions_json(),
+            fixture_digest=FIXTURE_DIGEST,
+            probe_definition_digest=PROBE_DEFINITION_DIGEST,
+            probe_digest="4" * 64,
+            qualified_at=NOW.isoformat(),
+            passed=False,
+            failure_code="integrity_error",
+            failure_reason="Historical evidence integrity check failed",
+        )
+    )
+
+    with pytest.raises(StrategyJobConflict, match="not qualified"):
+        _enqueue(repo, "2026-05", "2026-05")
+
+    assert repo.list_strategy_jobs() == ()
+
+
+def test_database_rejects_standalone_version_and_premature_digest_writes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    queued = _enqueue(repo, "2026-05", "2026-05").job
+    assert queued is not None
+
+    with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE strategy_jobs SET status_version=status_version+1 WHERE id=?",
+            (queued.id,),
+        )
+    with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE initialization_runs SET ordered_month_digest=? WHERE job_id=?",
+            ("9" * 64, queued.id),
+        )

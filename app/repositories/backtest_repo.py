@@ -411,6 +411,9 @@ CREATE TABLE IF NOT EXISTS initialization_runs (
     requested_months_json TEXT NOT NULL,
     requested_month_digest TEXT NOT NULL CHECK(length(requested_month_digest) = 64),
     calendar_dataset_version TEXT NOT NULL,
+    qualification_contract_digest TEXT NOT NULL CHECK(
+        length(qualification_contract_digest) = 64
+    ),
     ordered_month_digest TEXT CHECK(
         ordered_month_digest IS NULL OR length(ordered_month_digest) = 64
     ),
@@ -453,19 +456,22 @@ BEGIN SELECT RAISE(ABORT, 'illegal strategy job transition'); END;
 
 CREATE TRIGGER IF NOT EXISTS strategy_job_version_monotonic
 BEFORE UPDATE ON strategy_jobs
-WHEN (
-    NEW.status IS NOT OLD.status
-    OR NEW.claim_token IS NOT OLD.claim_token
-    OR NEW.current_month IS NOT OLD.current_month
-    OR NEW.cancel_requested_at IS NOT OLD.cancel_requested_at
-    OR NEW.failure_code IS NOT OLD.failure_code
-    OR NEW.failed_month IS NOT OLD.failed_month
-    OR NEW.failure_detail IS NOT OLD.failure_detail
-    OR NEW.deleted_at IS NOT OLD.deleted_at
-    OR NEW.audit_summary IS NOT OLD.audit_summary
- )
- AND NEW.status_version != OLD.status_version + 1
+WHEN NEW.status_version != OLD.status_version + 1
 BEGIN SELECT RAISE(ABORT, 'strategy job version is not monotonic'); END;
+
+CREATE TRIGGER IF NOT EXISTS strategy_job_version_requires_mutation
+BEFORE UPDATE ON strategy_jobs
+WHEN NEW.status_version != OLD.status_version
+ AND NEW.status IS OLD.status
+ AND NEW.claim_token IS OLD.claim_token
+ AND NEW.current_month IS OLD.current_month
+ AND NEW.cancel_requested_at IS OLD.cancel_requested_at
+ AND NEW.failure_code IS OLD.failure_code
+ AND NEW.failed_month IS OLD.failed_month
+ AND NEW.failure_detail IS OLD.failure_detail
+ AND NEW.deleted_at IS OLD.deleted_at
+ AND NEW.audit_summary IS OLD.audit_summary
+BEGIN SELECT RAISE(ABORT, 'strategy job version requires a lifecycle mutation'); END;
 
 CREATE TRIGGER IF NOT EXISTS initialization_job_requires_subtype_before_running
 BEFORE UPDATE OF status ON strategy_jobs
@@ -503,9 +509,20 @@ WHEN NEW.job_id != OLD.job_id
   OR NEW.requested_months_json != OLD.requested_months_json
   OR NEW.requested_month_digest != OLD.requested_month_digest
   OR NEW.calendar_dataset_version != OLD.calendar_dataset_version
+  OR NEW.qualification_contract_digest != OLD.qualification_contract_digest
   OR (OLD.ordered_month_digest IS NOT NULL AND NEW.ordered_month_digest IS NOT OLD.ordered_month_digest)
   OR (OLD.ordered_month_digest IS NULL AND NEW.ordered_month_digest IS NULL)
 BEGIN SELECT RAISE(ABORT, 'initialization configuration is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS initialization_digest_requires_running_job
+BEFORE UPDATE OF ordered_month_digest ON initialization_runs
+WHEN OLD.ordered_month_digest IS NULL
+ AND NEW.ordered_month_digest IS NOT NULL
+ AND NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = NEW.job_id AND job.status = 'running'
+ )
+BEGIN SELECT RAISE(ABORT, 'initialization digest requires running job'); END;
 
 CREATE TRIGGER IF NOT EXISTS initialization_run_immutable_delete
 BEFORE DELETE ON initialization_runs
@@ -666,7 +683,8 @@ def _row_to_initialization(
         requested_months=tuple(months),
         requested_month_digest=str(row[5]),
         calendar_dataset_version=str(row[6]),
-        ordered_month_digest=None if row[7] is None else str(row[7]),
+        qualification_contract_digest=str(row[7]),
+        ordered_month_digest=None if row[8] is None else str(row[8]),
     )
 
 
@@ -771,6 +789,58 @@ class BacktestRepository:
             ).fetchone()
         return None if row is None else _row_to_result(row)
 
+    @staticmethod
+    def _qualification_is_current(result: QualificationResult) -> bool:
+        from app.services.backtest.historical_data_qualification import (
+            FIXTURE_CONTRACT_VERSION,
+            REQUEST_CONTRACT_VERSION,
+            current_source_versions_json,
+        )
+
+        source_versions_json = current_source_versions_json()
+        if not result.passed or result.source_versions_json != source_versions_json:
+            return False
+        try:
+            sources = json.loads(source_versions_json)
+        except json.JSONDecodeError:
+            return False
+        expected = manifest_digest(
+            {
+                "sources": sources,
+                "calendar_digest": TradingCalendar().session_table_digest(),
+                "request_contract": REQUEST_CONTRACT_VERSION,
+                "fixture_contract": FIXTURE_CONTRACT_VERSION,
+                "fixture_digest": result.fixture_digest,
+                "probe_definition_digest": result.probe_definition_digest,
+            }
+        )
+        return result.contract_digest == expected
+
+    def current_qualification_contract_digest(self) -> str | None:
+        result = self.latest_recorded_qualification()
+        if result is None or not self._qualification_is_current(result):
+            return None
+        return result.contract_digest
+
+    @classmethod
+    def _require_qualification_on_connection(
+        cls, conn: sqlite3.Connection, expected_digest: str
+    ) -> None:
+        row = conn.execute(
+            """SELECT contract_digest, source_versions_json, fixture_digest,
+                      probe_definition_digest, probe_digest, qualified_at, passed,
+                      failure_code, failure_reason
+               FROM historical_source_qualifications ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            raise StrategyJobConflict("historical data contract is not qualified")
+        result = _row_to_result(row)
+        if (
+            result.contract_digest != expected_digest
+            or not cls._qualification_is_current(result)
+        ):
+            raise StrategyJobConflict("historical data contract is not qualified")
+
     def roster_digest_for_lineage(self, lineage_id: str) -> str | None:
         with session(self._connect) as conn:
             row = conn.execute(
@@ -839,6 +909,7 @@ class BacktestRepository:
         requested_start: str,
         requested_end: str,
         calendar_dataset_version: str,
+        qualification_contract_digest: str,
         parent_job_id: str | None = None,
     ) -> InitializationEnqueueResultV1:
         """Atomically enqueue one initialization, or return a verified no-op."""
@@ -853,6 +924,9 @@ class BacktestRepository:
         try:
             with session(self._connect) as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                self._require_qualification_on_connection(
+                    conn, qualification_contract_digest
+                )
                 profile = conn.execute(
                     """SELECT calendar_dataset_version
                        FROM snapshot_profiles WHERE profile_hash=?""",
@@ -902,8 +976,9 @@ class BacktestRepository:
                     """INSERT INTO initialization_runs (
                            job_id, profile_hash, requested_start, requested_end,
                            requested_months_json, requested_month_digest,
-                           calendar_dataset_version, ordered_month_digest
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)""",
+                           calendar_dataset_version, qualification_contract_digest,
+                           ordered_month_digest
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
                     (
                         job_id,
                         profile_hash,
@@ -912,6 +987,7 @@ class BacktestRepository:
                         rendered_months,
                         month_digest,
                         calendar_dataset_version,
+                        qualification_contract_digest,
                     ),
                 )
                 job = self._load_strategy_job(conn, job_id)
@@ -1000,7 +1076,7 @@ class BacktestRepository:
                 """UPDATE strategy_jobs
                    SET current_month=?, status_version=status_version+1, updated_at=?
                    WHERE id=? AND status='running' AND claim_token=?
-                     AND status_version=?""",
+                     AND status_version=? AND cancel_requested_at IS NULL""",
                 (
                     month,
                     self._job_now(),
@@ -1087,7 +1163,7 @@ class BacktestRepository:
                        failure_code=?, failed_month=?, failure_detail=?,
                        status_version=status_version+1, updated_at=?
                    WHERE id=? AND status='running' AND claim_token=?
-                     AND status_version=?""",
+                     AND status_version=? AND cancel_requested_at IS NULL""",
                 (
                     failure_code.value,
                     failed_month,
@@ -1190,7 +1266,8 @@ class BacktestRepository:
         row = conn.execute(
             """SELECT job_id, profile_hash, requested_start, requested_end,
                       requested_months_json, requested_month_digest,
-                      calendar_dataset_version, ordered_month_digest
+                      calendar_dataset_version, qualification_contract_digest,
+                      ordered_month_digest
                FROM initialization_runs WHERE job_id=?""",
             (job_id,),
         ).fetchone()
@@ -1397,6 +1474,8 @@ class BacktestRepository:
         self,
         commit: MonthlySnapshotCommitV1,
         evidence_verifier: HistoricalEvidenceVerifier,
+        *,
+        job_claim: tuple[str, str] | None = None,
     ) -> SnapshotMonthManifestV1:
         """Atomically compare-and-insert one complete Ready snapshot month."""
         try:
@@ -1415,6 +1494,16 @@ class BacktestRepository:
             self._verify_snapshot_input_evidence(canonical, evidence_verifier)
             with session(self._connect) as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                if job_claim is not None:
+                    owned = conn.execute(
+                        """SELECT 1 FROM strategy_jobs
+                           WHERE id=? AND status='running' AND claim_token=?""",
+                        job_claim,
+                    ).fetchone()
+                    if owned is None:
+                        raise StrategyJobConflict(
+                            "snapshot publisher no longer owns the job"
+                        )
                 self._validate_snapshot_roster(conn, canonical)
                 self._insert_profile_on_connection(conn, canonical.profile)
                 existing = conn.execute(
@@ -1527,7 +1616,7 @@ class BacktestRepository:
                 )
                 self._verify_snapshot_rows(conn, canonical)
                 return manifest
-        except BacktestIntegrityError:
+        except (BacktestIntegrityError, StrategyJobConflict):
             raise
         except Exception as exc:
             code = str(getattr(exc, "code", "integrity_error"))
