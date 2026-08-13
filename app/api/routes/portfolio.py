@@ -260,8 +260,16 @@ async def import_sipp(
         )
 
     positions = trader.get_portfolio(portfolio_id=pid)
+    # Re-read from storage rather than trusting result.cash_balance: that
+    # field is a non-optional float (0.0 whenever no cash balance was ever
+    # recorded, same as a genuine zero), so passing it straight through
+    # would render a phantom CASH £0.00 row for e.g. a stock-only import
+    # into a portfolio with no cash history at all (Story 1.9 AC2, deferred
+    # pending Story 1.5's landing -- get_cash_balance now distinguishes a
+    # real zero/negative balance from never-set). Matches the fresh-read
+    # pattern refresh_portfolio_prices and default_portfolio_context use.
     context = portfolio.portfolio_partial_context(
-        positions, cash_balance=result.cash_balance, portfolio_id=pid
+        positions, cash_balance=trader.get_cash_balance(pid), portfolio_id=pid
     )
     message = (
         f"Imported {result.buy_count} buy(s), {result.sell_count} sell(s), "
