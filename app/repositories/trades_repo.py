@@ -1,14 +1,32 @@
 """Repository for the ``trades`` table in ``trades.db``."""
 
+import logging
+from collections.abc import Iterable
 from typing import Any
 
+from app.core.ticker_identity import (
+    canonicalize_or_fallback,
+    load_aliases,
+    matching_raw_tickers,
+)
 from app.repositories.db import Connect, session
 from app.schemas import Trade
 from app.schemas.trade import SippImportRowOutcome
 
+logger = logging.getLogger(__name__)
+
 # Dates are stored ISO (YYYY-MM-DD), which sorts chronologically as text.
 _DATE_SORT = "date"
 _REPLAY_COLUMNS = "ticker, action, shares, price, date, stop_loss, entry_price"
+
+
+def _in_placeholders(values: Iterable[Any]) -> str:
+    """Return a ``"?, ?, ..."`` placeholder string, one per value.
+
+    Shared by ``delete_by_ticker``/``history`` so the ``WHERE ticker IN
+    (...)`` placeholder string is built once instead of inline in each.
+    """
+    return ", ".join("?" for _ in values)
 
 
 def _row_to_trade(row: tuple[Any, ...]) -> Trade:
@@ -147,20 +165,45 @@ class TradesRepository:
             return cur.rowcount > 0
 
     def delete_by_ticker(self, ticker: str, portfolio_id: int | None = None) -> None:
-        """Delete every trade for a ticker, optionally within one portfolio."""
+        """Delete every trade whose canonicalized ticker equals ``ticker``.
+
+        ``ticker`` is treated as a canonical identity (the reverse of
+        ``canonical_ticker``): every raw spelling that resolves to it via
+        ``matching_raw_tickers`` is deleted, not just rows stored under
+        ``ticker``'s exact spelling. This is what makes ``correct_trade()``
+        (a live UI action) actually replace a position's trades instead of
+        silently no-op-deleting when the stored rows use a different (but
+        alias-equivalent) raw spelling than the canonical ticker the UI
+        passed back.
+        """
+        raw_tickers = list(matching_raw_tickers(ticker, load_aliases()))
+        placeholders = _in_placeholders(raw_tickers)
         with session(self._connect) as conn:
             if portfolio_id is None:
-                conn.execute("DELETE FROM trades WHERE ticker = ?", (ticker,))
+                conn.execute(
+                    f"DELETE FROM trades WHERE ticker IN ({placeholders})",
+                    tuple(raw_tickers),
+                )
             else:
                 conn.execute(
-                    "DELETE FROM trades WHERE ticker = ? AND portfolio_id = ?",
-                    (ticker, portfolio_id),
+                    f"DELETE FROM trades WHERE ticker IN ({placeholders})"
+                    " AND portfolio_id = ?",
+                    (*raw_tickers, portfolio_id),
                 )
 
     def history(
         self, ticker: str | None = None, portfolio_id: int | None = None
     ) -> list[Trade]:
-        """Return trades newest-first, optionally filtered by ticker/portfolio."""
+        """Return trades newest-first, optionally filtered by ticker/portfolio.
+
+        A ``ticker`` filter is treated as a canonical identity: every raw
+        spelling that resolves to it (via ``matching_raw_tickers``) is
+        matched, not just rows stored under ``ticker``'s exact spelling.
+        Every returned ``Trade.ticker`` is canonicalized (via
+        ``canonicalize_or_fallback``), regardless of whether a filter was
+        given -- one consistent display form per underlying security.
+        """
+        aliases = load_aliases()
         base = (
             "SELECT id, ticker, action, shares, price, date, notes, stop_loss,"
             " entry_price, portfolio_id, realised_pnl_ack_at, currency FROM trades"
@@ -169,8 +212,9 @@ class TradesRepository:
         clauses: list[str] = []
         params: list[Any] = []
         if ticker:
-            clauses.append("ticker = ?")
-            params.append(ticker)
+            raw_tickers = list(matching_raw_tickers(ticker, aliases))
+            clauses.append(f"ticker IN ({_in_placeholders(raw_tickers)})")
+            params.extend(raw_tickers)
         if portfolio_id is not None:
             clauses.append("portfolio_id = ?")
             params.append(portfolio_id)
@@ -178,7 +222,12 @@ class TradesRepository:
         sql = f"{base}{where} ORDER BY {order}"
         with session(self._connect) as conn:
             rows = conn.execute(sql, tuple(params)).fetchall()
-        return [_row_to_trade(r) for r in rows]
+        trades = [_row_to_trade(r) for r in rows]
+        for trade in trades:
+            trade.ticker = canonicalize_or_fallback(
+                trade.ticker, aliases, logger=logger, context="history"
+            )
+        return trades
 
     def open_rows(self, portfolio_id: int | None = None) -> list[tuple[Any, ...]]:
         """Return valid-ticker trade rows in chronological order for replay.
@@ -223,9 +272,18 @@ class TradesRepository:
 
     def held_tickers(self) -> set[str]:
         """Return the set of tickers with a net-positive position in any
-        portfolio (used for the watchlist "held" flag, which spans accounts)."""
+        portfolio (used for the watchlist "held" flag, which spans accounts).
+
+        Accumulates net position per canonical ticker (via
+        ``canonicalize_or_fallback``, HSFWA protected) -- the same
+        "canonicalize before it becomes a dict key" shape ``_replay_trades``
+        uses -- so the returned set agrees with ``get_portfolio()``'s
+        canonicalized identity even when trades for one security are stored
+        under more than one raw spelling.
+        """
         from collections import defaultdict
 
+        aliases = load_aliases()
         by_pf: dict[Any, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         with session(self._connect) as conn:
             rows = conn.execute(
@@ -234,8 +292,11 @@ class TradesRepository:
                 " ORDER BY date, id"
             ).fetchall()
         for pid, ticker, action, shares in rows:
+            canonical = canonicalize_or_fallback(
+                ticker, aliases, logger=logger, context="held_tickers"
+            )
             delta = shares if action == "BUY" else -shares
-            by_pf[pid][ticker] += delta
+            by_pf[pid][canonical] += delta
         held: set[str] = set()
         for positions in by_pf.values():
             for ticker, net in positions.items():

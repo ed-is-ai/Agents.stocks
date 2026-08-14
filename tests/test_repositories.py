@@ -47,6 +47,118 @@ def test_trades_history_filter_and_delete(trades_connect):
     assert repo.history() == []
 
 
+def test_trades_held_tickers_canonicalizes(trades_connect, monkeypatch):
+    """Story 2.1: ``held_tickers()`` agrees with ``get_portfolio()``'s
+    canonical identity even when trades are stored under a raw,
+    alias-equivalent spelling -- the watchlist/orchestrator "held" check
+    must never disagree with the Portfolio tab's canonical display."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    assert repo.held_tickers() == {"ABC"}
+
+
+def test_trades_held_tickers_hsfwa_unaffected_by_alias(trades_connect, monkeypatch):
+    """HSFWA's identity must never be altered by alias-file contents, even
+    with a configured ``"HSFWA"`` alias entry."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"HSFWA": "REAL.L"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("HSFWA", "BUY", 10, 100.0, "01/02/2024")
+    assert repo.held_tickers() == {"HSFWA"}
+
+
+def test_trades_delete_by_ticker_matches_alias_equivalent_raw_rows(
+    trades_connect, monkeypatch
+):
+    """``correct_trade()`` regression: deleting by the canonical spelling
+    the UI now shows must delete rows stored under a raw alias-equivalent
+    spelling too -- never a silent no-op that double-counts shares."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    repo.delete_by_ticker("ABC")
+    assert repo.history() == []
+
+
+def test_trades_delete_by_ticker_alias_expansion_respects_portfolio_scope(
+    trades_connect, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024", portfolio_id=1)
+    repo.insert("ABC.L", "BUY", 5, 100.0, "01/02/2024", portfolio_id=2)
+    repo.delete_by_ticker("ABC", portfolio_id=1)
+    assert repo.history(portfolio_id=1) == []
+    assert len(repo.history(portfolio_id=2)) == 1
+
+
+def test_trades_history_filter_matches_alias_equivalent_raw_rows(
+    trades_connect, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    history = repo.history("ABC")
+    assert len(history) == 1
+    assert history[0].ticker == "ABC"
+
+
+def test_trades_history_canonicalizes_ticker_regardless_of_filter(
+    trades_connect, monkeypatch
+):
+    """Every returned ``Trade.ticker`` is canonicalized -- one consistent
+    display form -- whether or not a ``ticker`` filter was given."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    history = repo.history()
+    assert history[0].ticker == "ABC"
+
+
+def test_trades_delete_by_ticker_cyclic_alias_still_deletes_own_spelling(
+    trades_connect, monkeypatch
+):
+    """A cyclic (misconfigured) alias chain must not crash or silently
+    no-op ``delete_by_ticker`` -- it still deletes rows stored under the
+    exact spelling passed in, even though the cycle means no *other* raw
+    spelling can be safely assumed to be alias-equivalent."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases",
+        lambda: {"ABC.L": "ABC", "ABC": "ABC.L"},
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    repo.delete_by_ticker("ABC.L")
+    assert repo.history() == []
+
+
+def test_trades_history_cyclic_alias_degrades_to_raw_ticker(
+    trades_connect, monkeypatch
+):
+    """A cyclic alias chain degrades ``history()``'s displayed ticker to
+    its raw, unresolved spelling rather than raising."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases",
+        lambda: {"ABC.L": "ABC", "ABC": "ABC.L"},
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    history = repo.history()
+    assert history[0].ticker == "ABC.L"
+
+
 def test_trades_open_rows_excludes_invalid(trades_connect):
     repo = TradesRepository(trades_connect)
     repo.insert("AAPL", "BUY", 10, 100.0, "01/02/2024")

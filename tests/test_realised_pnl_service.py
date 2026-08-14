@@ -36,6 +36,9 @@ class _StubPortfolioService:
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         return {}
 
+    def load_ticker_aliases(self) -> dict[str, str]:
+        return {}
+
 
 def _make_service_with_agent(
     tmp_path: Path, portfolio_service: object | None = None
@@ -434,9 +437,15 @@ class _FakePortfolioService:
     ``historical_gbpusd_rates`` call's argument list so tests can assert on
     batching behaviour (AC2)."""
 
-    def __init__(self, currencies: dict[str, str], rates: dict[str, float]) -> None:
+    def __init__(
+        self,
+        currencies: dict[str, str],
+        rates: dict[str, float],
+        aliases: dict[str, str] | None = None,
+    ) -> None:
         self._currencies = currencies
         self._rates = rates
+        self._aliases = aliases or {}
         self.rate_lookup_calls: list[list[str]] = []
 
     def ticker_currency(self, ticker: str) -> str:
@@ -445,6 +454,9 @@ class _FakePortfolioService:
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         self.rate_lookup_calls.append(list(dates))
         return {d: self._rates[d] for d in dates if d in self._rates}
+
+    def load_ticker_aliases(self) -> dict[str, str]:
+        return self._aliases
 
 
 def test_gbp_ticker_round_trip_uses_rate_of_one_no_conversion(
@@ -705,6 +717,55 @@ def test_realised_pnl_service_calls_ticker_currency_not_yfinance_directly(
 
     assert calls == ["TEST1"]
     assert "yfinance" not in inspect.getsource(RealisedPnlService)
+
+
+# --- Story 2.1: shared security identity for FIFO matching -----------------
+
+
+def test_fifo_cross_spelling_round_trip_matches_as_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A BUY under one raw spelling and a SELL under an alias-equivalent
+    raw spelling FIFO-match as one RoundTrip -- no UnmatchedSell."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    portfolio = _FakePortfolioService(
+        currencies={"ABC": "GBP"}, rates={}, aliases={"ABC.L": "ABC"}
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("ABC.L", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("ABC", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 1
+    assert summary.unmatched_count == 0
+    assert list(summary.round_trips) == ["ABC"]
+    rt = summary.round_trips["ABC"][0]
+    assert rt.ticker == "ABC"
+    assert rt.shares == 10
+
+
+def test_fifo_vs_avg_cost_agree_with_alias_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an alias configured, FIFO's open-lot total and the avg-cost
+    replay's total agree -- no mismatched_tickers entry, mirroring
+    real-world behaviour where both replays read the same alias file."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    portfolio = _FakePortfolioService(
+        currencies={"ABC": "GBP"}, rates={}, aliases={"ABC.L": "ABC"}
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("ABC.L", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("ABC", 4, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.mismatched_tickers == []
 
 
 # --- Story 1.3: unmatched-sell detection -----------------------------------

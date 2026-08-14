@@ -20,6 +20,13 @@ from pydantic import PrivateAttr
 from app.agents.base import Agent
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
 from app.core.money import Money, MoneyParseError, has_currency_marker, parse_money
+from app.core.ticker_identity import (
+    HSFWA_TICKER,
+    AmbiguousTickerAliasError,
+    canonical_ticker,
+    canonicalize_or_fallback,
+    load_aliases,
+)
 from app.schemas import CashFlow, Position, SippImportResult, Trade
 from app.repositories import db
 from app.repositories.account_repo import AccountStateRepository
@@ -518,9 +525,22 @@ class TraderAgent(Agent):
     def _replay_trades(
         rows: list[tuple[Any, ...]],
     ) -> dict[str, dict[str, Any]]:
-        """Replay trade rows to derive per-ticker running state."""
+        """Replay trade rows to derive per-ticker running state.
+
+        Each row's ticker is canonicalized (via ``canonicalize_or_fallback``,
+        HSFWA protected) before being used as the ``state`` dict key, so
+        cross-spelling trades for one security (e.g. ``ABC.L`` and ``ABC``
+        under a configured alias) fold into one running position instead of
+        fragmenting -- agreeing with FIFO replay's and ``held_tickers()``'s
+        identity. A cycle or malformed alias file degrades to the raw
+        ticker with a logged warning rather than crashing this replay.
+        """
+        aliases = load_aliases()
         state: dict[str, dict[str, Any]] = {}
-        for ticker, action, shares, price, date, stop_loss, entry_price in rows:
+        for raw_ticker, action, shares, price, date, stop_loss, entry_price in rows:
+            ticker = canonicalize_or_fallback(
+                raw_ticker, aliases, logger=logger, context="_replay_trades"
+            )
             if ticker not in state:
                 state[ticker] = {
                     "shares": 0.0,
@@ -856,6 +876,10 @@ class TraderAgent(Agent):
         cash_balance_rank: dict[str, tuple[int, str, int]] = {}
         cash_balance: dict[str, Decimal] = {}
 
+        # Loaded once per import (not per row) -- the alias map is a small,
+        # rarely-changing local config file (no per-row/caching concern).
+        aliases = load_aliases()
+
         for idx, row in enumerate(rows):
             qty = row.get("Quantity", "").strip()
             symbol = row.get("Symbol", "").strip()
@@ -959,22 +983,67 @@ class TraderAgent(Agent):
                                 "BUY" if debit > 0 else "SELL" if credit > 0 else None
                             )
                             if action:
-                                ticker = symbol.upper() if is_trade else "HSFWA"
-                                planned_trades.append(
-                                    (
-                                        ticker,
-                                        action,
-                                        shares,
-                                        float(price),
-                                        date,
-                                        "",
-                                        reference or None,
-                                        portfolio_id,
-                                        idempotency_key,
-                                        price_money.currency if price_money else "GBP",
+                                # HSBC GLOB keeps the fixed literal ticker
+                                # (not a broker Symbol, never canonicalized).
+                                # A genuine broker Symbol is resolved via
+                                # canonical_ticker directly (not
+                                # canonicalize_or_fallback) so this method
+                                # can catch AmbiguousTickerAliasError itself
+                                # and reject the row via failed_rows instead
+                                # of raising or silently falling back --
+                                # import is the one call site with a
+                                # per-row rejection channel. A resolved
+                                # ticker that collides with the reserved
+                                # HSFWA literal (a genuine broker Symbol's
+                                # chain unexpectedly landing there) is
+                                # rejected the same way. Neither rejection
+                                # branch calls classify() -- matching every
+                                # sibling row-rejection branch in this
+                                # function.
+                                ticker: str | None
+                                if is_trade:
+                                    try:
+                                        ticker = canonical_ticker(
+                                            symbol.upper(), aliases
+                                        )
+                                    except AmbiguousTickerAliasError as exc:
+                                        failed_rows.append(
+                                            f"row {row_label}: ambiguous "
+                                            f"ticker alias for "
+                                            f"{symbol.upper()!r}: {exc}"
+                                        )
+                                        ticker = None
+                                    else:
+                                        if ticker == HSFWA_TICKER:
+                                            failed_rows.append(
+                                                f"row {row_label}: resolved "
+                                                f"identity for "
+                                                f"{symbol.upper()!r} "
+                                                "collides with the reserved "
+                                                "HSFWA ticker"
+                                            )
+                                            ticker = None
+                                else:
+                                    ticker = HSFWA_TICKER
+
+                                if ticker is not None:
+                                    planned_trades.append(
+                                        (
+                                            ticker,
+                                            action,
+                                            shares,
+                                            float(price),
+                                            date,
+                                            "",
+                                            reference or None,
+                                            portfolio_id,
+                                            idempotency_key,
+                                            price_money.currency
+                                            if price_money
+                                            else "GBP",
+                                        )
                                     )
-                                )
-                                classify(idempotency_key, existing_trade_keys)
+                                    classify(idempotency_key, existing_trade_keys)
                             else:
                                 failed_rows.append(
                                     f"row {row_label}: trade with no "

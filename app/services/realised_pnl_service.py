@@ -14,6 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date
 
+from app.core.ticker_identity import canonicalize_or_fallback
 from app.schemas import RealisedPnlSummary, RoundTrip, Trade, UnmatchedSell
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
@@ -198,12 +199,24 @@ class RealisedPnlService:
         revisited or retroactively filled by a later BUY for the same
         ticker, because the SELL that produced it is never re-examined once
         the loop has moved past it.
+
+        Each trade's ticker is canonicalized (via ``canonicalize_or_fallback``,
+        HSFWA protected) before it keys ``queues`` -- the shared identity
+        every ``RoundTrip``/``UnmatchedSell`` displays -- so cross-spelling
+        trades for one security fold into a single FIFO queue instead of
+        fragmenting, agreeing with the average-cost replay's identity. A
+        cycle or malformed alias file degrades to the raw ticker with a
+        logged warning rather than crashing this replay.
         """
+        aliases = self._portfolio.load_ticker_aliases()
         queues: dict[str, deque[_Lot]] = {}
         round_trips: list[_RawRoundTrip] = []
         unmatched_sells: list[UnmatchedSell] = []
         for t in trades:
-            queue = queues.setdefault(t.ticker, deque())
+            ticker = canonicalize_or_fallback(
+                t.ticker, aliases, logger=logger, context="_replay_fifo"
+            )
+            queue = queues.setdefault(ticker, deque())
             if t.action == "BUY":
                 queue.append(_Lot(t.shares, t.price, t.date))
                 continue
@@ -213,7 +226,7 @@ class RealisedPnlService:
                 lot = queue[0]
                 matched = min(lot.shares_remaining, remaining_to_sell)
                 round_trips.append(
-                    self._build_raw_round_trip(t, lot, matched, portfolio_id)
+                    self._build_raw_round_trip(t, lot, matched, portfolio_id, ticker)
                 )
                 lot.shares_remaining -= matched
                 remaining_to_sell -= matched
@@ -227,7 +240,7 @@ class RealisedPnlService:
                         "Realised P&L: unmatched SELL for %s has no trade id "
                         "-- this should be unreachable for a persisted row; "
                         "falling back to trade_id=0",
-                        t.ticker,
+                        ticker,
                     )
                 reason = (
                     _PARTIAL_SHORTFALL_REASON.format(shares=remaining_to_sell)
@@ -237,7 +250,7 @@ class RealisedPnlService:
                 unmatched_sells.append(
                     UnmatchedSell(
                         trade_id=t.id or 0,
-                        ticker=t.ticker,
+                        ticker=ticker,
                         portfolio_id=portfolio_id,
                         date=t.date,
                         shares=remaining_to_sell,
@@ -250,19 +263,25 @@ class RealisedPnlService:
 
     @staticmethod
     def _build_raw_round_trip(
-        sell: Trade, lot: _Lot, matched_shares: float, portfolio_id: int
+        sell: Trade, lot: _Lot, matched_shares: float, portfolio_id: int, ticker: str
     ) -> _RawRoundTrip:
         """Build one raw (pre-GBP-conversion) Round-trip for a lot (or
         partial lot) consumed by a SELL. Entry/exit price stay in the
         ticker's native currency here; GBP conversion is a separate pass
         (``_convert_to_gbp``) so trade dates can be batch-resolved once
         across every Round-trip instead of per leg (Story 1.2 AC1/AC2).
+
+        ``ticker`` is the caller's already-canonicalized identity (not
+        ``sell.ticker``, the raw persisted spelling) -- ``_replay_fifo``
+        resolves it once per trade and passes it in explicitly so this
+        method never has to re-canonicalize or risk disagreeing with the
+        queue key the caller used.
         """
         holding_days = (
             date.fromisoformat(sell.date) - date.fromisoformat(lot.buy_date)
         ).days
         return _RawRoundTrip(
-            ticker=sell.ticker,
+            ticker=ticker,
             portfolio_id=portfolio_id,
             entry_date=lot.buy_date,
             entry_price=lot.buy_price,
