@@ -251,10 +251,11 @@ def test_mismatched_tickers_empty_when_fifo_and_avg_cost_agree(
 def test_oversell_unmatched_shortfall_does_not_itself_cause_mismatch(
     tmp_path: Path,
 ) -> None:
-    """An oversell (SELL exceeding the open lot) is recorded as an unmatched
-    occurrence, and -- since both the FIFO and avg-cost replays clamp an
-    oversell's shortfall at zero the same way -- it does not by itself
-    produce a false-positive mismatch."""
+    """Story 2.3 AC5: an oversell (SELL exceeding the open lot) is recorded
+    as an unmatched occurrence, and -- once the FIFO side nets its
+    ``unmatched_sells`` shortfall against its (structurally non-negative)
+    ``open_lots`` total -- it agrees with avg-cost's now-negative-capable
+    ``shares`` and does not by itself produce a false-positive mismatch."""
     service, agent = _make_service_with_agent(tmp_path)
     agent.record_buy("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
     agent.record_sell("TEST1", 8, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
@@ -263,6 +264,69 @@ def test_oversell_unmatched_shortfall_does_not_itself_cause_mismatch(
 
     assert summary.unmatched_count == 1
     assert summary.mismatched_tickers == []
+
+    # And the avg-cost side (get_portfolio) shows the same net oversold
+    # position: -3 shares, not clamped to 0 and not omitted.
+    portfolio = agent.get_portfolio(portfolio_id=PORTFOLIO_ID)
+    position = next(p for p in portfolio if p.ticker == "TEST1")
+    assert position.shares == -3.0
+
+
+def test_backdated_correcting_buy_resolves_unmatched_sell_into_round_trip(
+    tmp_path: Path,
+) -> None:
+    """Story 2.3 AC6: a SELL with no open lot, followed by a correcting Buy
+    dated *earlier* than the SELL, resolves into a RoundTrip on the next
+    ``compute_summary()`` call. Per the spec's Design Notes, this requires
+    no new re-match trigger code -- ``compute_summary`` already recomputes
+    fresh from live trade data (chronologically sorted) on every call, so
+    the correcting Buy naturally replays before the SELL it resolves."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_sell("TEST1", 5, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+    assert summary.unmatched_count == 1
+    assert summary.round_trip_count == 0
+
+    # Correcting Buy dated *before* the SELL it resolves.
+    agent.record_buy("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+
+    summary_after = service.compute_summary(PORTFOLIO_ID)
+    assert summary_after.unmatched_count == 0
+    assert summary_after.round_trip_count == 1
+    rt = summary_after.round_trips["TEST1"][0]
+    assert rt.entry_date == "2026-01-01"
+    assert rt.exit_date == "2026-02-01"
+    assert rt.shares == 5
+
+
+def test_partial_correcting_buy_leaves_smaller_remainder_same_identity(
+    tmp_path: Path,
+) -> None:
+    """Story 2.3 AC7: a correcting Buy smaller than the outstanding
+    shortfall leaves a smaller remainder tracked under the same SELL
+    trade_id/ticker identity, not re-reported as a new/different problem."""
+    service, agent = _make_service_with_agent(tmp_path)
+    sell = agent.record_sell("TEST1", 8, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+    assert summary.unmatched_count == 1
+    original = summary.unmatched_sells[0]
+    assert original.trade_id == sell.id
+    assert original.shares == 8
+
+    # Correcting Buy smaller than the shortfall, dated earlier than the SELL.
+    agent.record_buy("TEST1", 3, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+
+    summary_after = service.compute_summary(PORTFOLIO_ID)
+    assert summary_after.unmatched_count == 1
+    remainder = summary_after.unmatched_sells[0]
+    assert remainder.trade_id == sell.id
+    assert remainder.ticker == "TEST1"
+    assert remainder.shares == 5
+    # The correcting Buy's shares were consumed into one RoundTrip, not
+    # left floating separately.
+    assert summary_after.round_trip_count == 1
 
 
 def test_mismatched_tickers_flags_genuine_divergence(

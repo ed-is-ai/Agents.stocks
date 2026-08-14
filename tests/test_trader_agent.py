@@ -359,7 +359,13 @@ def test_to_iso_date_strips_embedded_bom() -> None:
     assert _to_iso_date("﻿2024-02-01") == "2024-02-01"
 
 
-def test_oversell_is_logged_and_clamped(tmp_path: Path, caplog) -> None:
+def test_oversell_is_logged_and_visible_with_negative_shares(
+    tmp_path: Path, caplog
+) -> None:
+    """Story 2.3: an oversell is no longer clamped to 0 -- the ticker stays
+    in ``get_portfolio()``'s results with a negative ``shares`` count (the
+    unconsumed shortfall, mirroring FIFO's ``UnmatchedSell`` convention),
+    and the existing oversell warning still fires."""
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
@@ -371,9 +377,87 @@ def test_oversell_is_logged_and_clamped(tmp_path: Path, caplog) -> None:
     with caplog.at_level(logging.WARNING):
         portfolio = agent.get_portfolio()
 
-    # Position is gone (clamped to 0), and the oversell was logged
-    assert all(p.ticker != "TEST1" for p in portfolio)
+    position = next(p for p in portfolio if p.ticker == "TEST1")
+    assert position.shares == -15.0
     assert any("Oversell" in r.message for r in caplog.records)
+
+
+def test_replay_trades_sell_within_epsilon_of_held_is_not_an_oversell(
+    caplog,
+) -> None:
+    """Story 2.3 review fix: the oversell check compares the *difference*
+    against ``QUANTITY_EPSILON``, not a bare ``shares > s["shares"]`` --
+    a SELL that is, within float precision, an exact match for the held
+    quantity must never log a false "Oversell" warning or leave a
+    phantom negative-dust position behind. Constructed directly against
+    ``_replay_trades`` (bypassing the DB) so the epsilon-tolerance is
+    exercised deterministically, independent of whether ordinary
+    arithmetic happens to produce float noise naturally."""
+    import logging
+
+    rows = [
+        ("TEST1", "BUY", 5.0, 100.0, "2026-01-01", None, None),
+        # 2e-9 below QUANTITY_EPSILON (5e-9) -- an exact sell in every
+        # practical sense, not a genuine oversell.
+        ("TEST1", "SELL", 5.0 + 2e-9, 110.0, "2026-01-02", None, None),
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        state = TraderAgent._replay_trades(rows)
+
+    assert not any("Oversell" in r.message for r in caplog.records)
+    assert abs(state["TEST1"]["shares"]) <= 5e-9
+
+
+def test_replay_trades_genuine_oversell_beyond_epsilon_still_warns() -> None:
+    """The epsilon tolerance must not swallow a real oversell -- only a
+    difference within ``QUANTITY_EPSILON`` is treated as a match."""
+    rows = [
+        ("TEST1", "BUY", 5.0, 100.0, "2026-01-01", None, None),
+        ("TEST1", "SELL", 5.01, 110.0, "2026-01-02", None, None),
+    ]
+
+    state = TraderAgent._replay_trades(rows)
+
+    assert state["TEST1"]["shares"] == -0.01
+
+
+def test_refresh_portfolio_prices_keeps_oversold_ticker_visible(
+    tmp_path: Path,
+) -> None:
+    """Story 2.3: the price-refresh path (a sibling of ``get_portfolio()``,
+    with its own copy of the visibility filter) must not silently drop an
+    oversold, negative-share ticker either -- it has to survive a live
+    price refresh the same way it survives the initial Portfolio tab
+    render."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.record_buy("TEST1", 10.0, 100.0, "2026-04-30")
+    agent.record_sell("TEST1", 25.0, 110.0, "2026-05-01")  # oversell -> -15
+
+    positions = agent.refresh_portfolio_prices(current_prices={"TEST1": 120.0})
+
+    position = next(p for p in positions if p.ticker == "TEST1")
+    assert position.shares == -15.0
+
+
+def test_replay_trades_buy_crossing_through_zero_does_not_crash() -> None:
+    """A BUY that pushes a negative (oversold) position *through* zero to a
+    new positive total -- not landing exactly on zero -- must not divide by
+    a near-zero denominator and crash. Per the spec's Design Notes, making
+    ``avg_cost`` economically "clean" while crossing zero is explicitly out
+    of scope; this only guards against a crash, matching the exact-zero
+    case's existing guard."""
+    rows = [
+        ("TEST1", "SELL", 3.0, 100.0, "2026-01-01", None, None),  # -> -3.0
+        ("TEST1", "BUY", 3.0000001, 50.0, "2026-01-02", None, None),
+    ]
+
+    state = TraderAgent._replay_trades(rows)
+
+    assert state["TEST1"]["shares"] == 1e-07
+    assert isinstance(state["TEST1"]["avg_cost"], float)
 
 
 def test_import_sipp_clean_well_formed_import_commits_and_closes_connection(

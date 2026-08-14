@@ -434,12 +434,18 @@
           {% endif %}
         </td>
         <td>
+          {# Story 2.3: an oversold position's `shares` can be negative --
+             never pre-fill that into these modals' shares field, since
+             both inputs require a positive value (min="0.0001") and would
+             silently block submission. Pass 0 (rendered as an empty
+             field by openAdjust/openSell's `shares || ''`) so the user
+             enters their own quantity instead. #}
           <button class="btn-adjust-sm me-2"
-                  onclick="openAdjust('{{ p.ticker }}', {{ p.shares }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %}, '{{ p.entry_date or '' }}', {% if p.stop_loss %}{{ p.stop_loss }}{% else %}''{% endif %}, {% if p.entry_price %}{{ p.entry_price }}{% else %}''{% endif %})">
+                  onclick="openAdjust('{{ p.ticker }}', {{ p.shares if p.shares > 0 else 0 }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %}, '{{ p.entry_date or '' }}', {% if p.stop_loss %}{{ p.stop_loss }}{% else %}''{% endif %}, {% if p.entry_price %}{{ p.entry_price }}{% else %}''{% endif %})">
             Adjust
           </button>
           <button class="btn-sell-sm"
-                  onclick="openSell('{{ p.ticker }}', {{ p.shares }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %})">
+                  onclick="openSell('{{ p.ticker }}', {{ p.shares if p.shares > 0 else 0 }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %})">
             Sell
           </button>
         </td>
