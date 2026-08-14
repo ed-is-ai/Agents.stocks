@@ -27,6 +27,7 @@ from app.core.config import (
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
+from app.schemas.trade import Trade
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
@@ -584,6 +585,44 @@ def _opening_lot_error(
     )
 
 
+def _same_day_ordering_warning(
+    realised_pnl: RealisedPnlService, lot: Trade, portfolio_id: int
+) -> str | None:
+    """Detect a known replay-ordering gap (documented in
+    ``deferred-work.md``): a same-date Opening Lot can't retroactively
+    resolve a same-date unmatched sell, because the same-day tie-break
+    (``_replay_sort_key``/``_REPLAY_ORDER``, shared with Stories 2.2/2.3)
+    falls back to ascending trade id -- and the sell an Opening Lot is
+    meant to fix is always written first, so it always has the lower id
+    and replays before the lot on a tie.
+
+    Returns a warning message only when ``lot`` is still entirely
+    untouched *and* an unmatched sell remains for the exact same
+    ticker/date -- the specific signature of this gap, not a lot that
+    legitimately only partially covers a larger shortfall (which is
+    expected behavior, not a bug). ``None`` when there's nothing to warn
+    about, including when ``lot.id`` is unset (unreachable for a
+    persisted row).
+    """
+    if lot.id is None:
+        return None
+    if realised_pnl.opening_lot_status(lot.id, portfolio_id) != "unconsumed":
+        return None
+    summary = realised_pnl.compute_summary(portfolio_id)
+    same_day_unmatched = any(
+        us.ticker == lot.ticker and us.date == lot.date
+        for us in summary.unmatched_sells
+    )
+    if not same_day_unmatched:
+        return None
+    return (
+        f"Added, but {lot.ticker} still has an unmatched sell dated "
+        f"{lot.date}: a same-day Opening Lot can't resolve a same-day "
+        "sell due to replay ordering. Try dating this Opening Lot one "
+        "day earlier instead."
+    )
+
+
 @router.post(
     "/portfolio/opening-lot",
     response_class=HTMLResponse,
@@ -593,6 +632,7 @@ async def create_opening_lot(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
+    realised_pnl: RealisedPnlDep,
     ticker: Annotated[str, Form()],
     shares: Annotated[float, Form()],
     price: Annotated[float, Form()],
@@ -610,7 +650,8 @@ async def create_opening_lot(
     very next ``compute_summary()`` call (e.g. opening the Realised P&L
     tab) already reflects the fresh lot -- no separate re-match step
     (AC5), since that service recomputes from live trade data on every
-    call.
+    call, except for the known same-day tie-break gap
+    ``_same_day_ordering_warning`` checks for.
     """
     pid = optional_int(portfolio_id)
     if pid is None or not trader.portfolio_exists(pid):
@@ -626,14 +667,19 @@ async def create_opening_lot(
             request, portfolio, "Enter a ticker and a positive shares/price.", pid
         )
     try:
-        trader.record_opening_lot(ticker, shares, price, date, notes, pid)
+        lot = trader.record_opening_lot(ticker, shares, price, date, notes, pid)
     except OpeningLotDuplicateError as exc:
         return _opening_lot_error(request, portfolio, str(exc), pid)
 
     context = portfolio.default_portfolio_context(pid)
-    context["import_message"] = (
-        f"Added Opening Lot: {shares:g} share(s) of {ticker} @ {price:g}."
-    )
+    warning = _same_day_ordering_warning(realised_pnl, lot, pid)
+    if warning:
+        context["import_status"] = "warning"
+        context["import_message"] = warning
+    else:
+        context["import_message"] = (
+            f"Added Opening Lot: {shares:g} share(s) of {ticker} @ {price:g}."
+        )
     logger.info("Opening Lot recorded: %s x%.4f @ %.4f", ticker, shares, price)
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
@@ -685,12 +731,19 @@ async def edit_opening_lot(
             pid,
         )
     try:
-        trader.update_opening_lot(trade_id, ticker, shares, price, date, notes, pid)
+        lot = trader.update_opening_lot(
+            trade_id, ticker, shares, price, date, notes, pid
+        )
     except (OpeningLotDuplicateError, ValueError) as exc:
         return _opening_lot_error(request, portfolio, str(exc), pid)
 
     context = portfolio.default_portfolio_context(pid)
-    context["import_message"] = "Opening Lot updated."
+    warning = _same_day_ordering_warning(realised_pnl, lot, pid)
+    if warning:
+        context["import_status"] = "warning"
+        context["import_message"] = warning
+    else:
+        context["import_message"] = "Opening Lot updated."
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 

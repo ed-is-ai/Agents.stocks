@@ -207,13 +207,13 @@
 {% endif %}
 
 {% if import_message %}
-<div class="alert {{ 'alert-danger' if import_status == 'error' else 'alert-success' }} border-0 d-flex align-items-center gap-2 mt-1 mb-3"
+<div class="alert {% if import_status == 'error' %}alert-danger{% elif import_status == 'warning' %}alert-warning{% else %}alert-success{% endif %} border-0 d-flex align-items-center gap-2 mt-1 mb-3"
      data-import-buy-count="{{ import_buy_count|default(0) }}"
      data-import-sell-count="{{ import_sell_count|default(0) }}"
      data-import-cash-count="{{ import_cash_count|default(0) }}"
      data-import-skipped-count="{{ import_skipped_count|default(0) }}"
      data-import-status="{{ import_status|default('ok') }}">
-  <i class="bi {{ 'bi-exclamation-octagon-fill' if import_status == 'error' else 'bi-check-circle-fill' }} fs-5"></i>
+  <i class="bi {% if import_status == 'error' %}bi-exclamation-octagon-fill{% elif import_status == 'warning' %}bi-exclamation-triangle-fill{% else %}bi-check-circle-fill{% endif %} fs-5"></i>
   <span>{{ import_message }}</span>
 </div>
 {% endif %}
