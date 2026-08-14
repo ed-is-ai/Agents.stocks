@@ -10,6 +10,7 @@ import hashlib
 import io
 import logging
 import re
+from datetime import date as _date
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -534,10 +535,32 @@ class TraderAgent(Agent):
         fragmenting -- agreeing with FIFO replay's and ``held_tickers()``'s
         identity. A cycle or malformed alias file degrades to the raw
         ticker with a logged warning rather than crashing this replay.
+
+        A row with an unparseable (non-ISO) ``date`` is skipped (logged,
+        not raised) -- Story 2.2, mirroring ``RealisedPnlService.
+        _sorted_valid_trades``'s existing FIFO skip so average-cost replay
+        never silently includes a row FIFO excludes.
         """
         aliases = load_aliases()
         state: dict[str, dict[str, Any]] = {}
-        for raw_ticker, action, shares, price, date, stop_loss, entry_price in rows:
+        for (
+            raw_ticker,
+            action,
+            shares,
+            price,
+            trade_date,
+            stop_loss,
+            entry_price,
+        ) in rows:
+            try:
+                _date.fromisoformat(trade_date)
+            except ValueError:
+                logger.warning(
+                    "_replay_trades: skipping row for %s with unparseable date %r",
+                    raw_ticker,
+                    trade_date,
+                )
+                continue
             ticker = canonicalize_or_fallback(
                 raw_ticker, aliases, logger=logger, context="_replay_trades"
             )
@@ -557,7 +580,7 @@ class TraderAgent(Agent):
                 ) / new_total
                 s["shares"] = new_total
                 if s["entry_date"] is None:
-                    s["entry_date"] = date
+                    s["entry_date"] = trade_date
                 if stop_loss is not None:
                     s["stop_loss"] = stop_loss
                 if entry_price is not None:
@@ -1041,6 +1064,7 @@ class TraderAgent(Agent):
                                             price_money.currency
                                             if price_money
                                             else "GBP",
+                                            idx,
                                         )
                                     )
                                     classify(idempotency_key, existing_trade_keys)
