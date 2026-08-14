@@ -14,6 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date
 
+from app.core.quantity import QUANTITY_EPSILON, round_quantity
 from app.core.ticker_identity import canonicalize_or_fallback
 from app.schemas import (
     RealisedPnlSummary,
@@ -27,9 +28,6 @@ from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
 
-# Share-count epsilon for the FIFO-vs-avg-cost mismatch check (AD-10). Never
-# compare floats with a bare `==`.
-_EPSILON = 1e-6
 _INVALID_TICKERS = {"", "n/a", "N/A"}
 
 # Story 1.3: two reason strings depending on whether any prior lot existed
@@ -43,13 +41,6 @@ _PARTIAL_SHORTFALL_REASON = "Sell exceeds available BUY lots by {shares:g} share
 # stored ``date`` isn't valid ISO-8601 -- surfaced both in the log line and
 # in the retrievable ``SkippedInvalidDateTrade`` structure.
 _INVALID_DATE_REASON = "Trade date {raw_date!r} is not valid ISO-8601"
-
-# Share-quantity precision for an UnmatchedSell's `shares` -- matches the
-# `_EPSILON` tolerance used for lot-consumption comparisons, so a SELL that
-# is (within tolerance) fully matched never surfaces as a spurious
-# near-zero UnmatchedSell, and a genuine shortfall never displays
-# float-subtraction residue like `2.9999999997` in the UI.
-_SHARES_PRECISION = 6
 
 
 def _round2(x: float) -> float:
@@ -123,7 +114,7 @@ class RealisedPnlService:
         )
         round_trips = self._convert_to_gbp(raw_round_trips)
         grouped = self._group_and_order(round_trips)
-        mismatched = self._mismatched_tickers(open_lots, portfolio_id)
+        mismatched = self._mismatched_tickers(open_lots, unmatched_sells, portfolio_id)
         # FX-unavailable Round-trips carry a 0.0 placeholder, not a real
         # figure, and must never enter the Account total (Story 1.2 AC7).
         total_pnl = _round2(
@@ -292,7 +283,7 @@ class RealisedPnlService:
                 continue
             remaining_to_sell = t.shares
             any_lot_matched = False
-            while remaining_to_sell > _EPSILON and queue:
+            while remaining_to_sell > QUANTITY_EPSILON and queue:
                 lot = queue[0]
                 matched = min(lot.shares_remaining, remaining_to_sell)
                 round_trips.append(
@@ -301,10 +292,10 @@ class RealisedPnlService:
                 lot.shares_remaining -= matched
                 remaining_to_sell -= matched
                 any_lot_matched = True
-                if lot.shares_remaining <= _EPSILON:
+                if lot.shares_remaining <= QUANTITY_EPSILON:
                     queue.popleft()
-            remaining_to_sell = round(remaining_to_sell, _SHARES_PRECISION)
-            if remaining_to_sell > _EPSILON:
+            remaining_to_sell = round_quantity(remaining_to_sell)
+            if remaining_to_sell > QUANTITY_EPSILON:
                 if t.id is None:
                     logger.warning(
                         "Realised P&L: unmatched SELL for %s has no trade id "
@@ -479,32 +470,55 @@ class RealisedPnlService:
         return {tk: by_ticker[tk] for tk in ordered_tickers}
 
     def _mismatched_tickers(
-        self, open_lots: dict[str, deque[_Lot]], portfolio_id: int
+        self,
+        open_lots: dict[str, deque[_Lot]],
+        unmatched_sells: list[UnmatchedSell],
+        portfolio_id: int,
     ) -> list[str]:
-        """Cross-check FIFO open-lot totals against the avg-cost replay.
+        """Cross-check FIFO's net position against the avg-cost replay.
 
-        Per AD-10, a ticker is reported only when its FIFO open-lot share
-        total disagrees with ``TraderService.get_portfolio()``'s avg-cost
-        total by more than ``_EPSILON`` shares — never a bare ``==``. Logs
-        a warning per mismatch; never raises.
+        Per AD-10, a ticker is reported only when FIFO's total disagrees
+        with ``TraderService.get_portfolio()``'s avg-cost total by more than
+        ``QUANTITY_EPSILON`` shares — never a bare ``==``. Logs a warning
+        per mismatch; never raises.
+
+        Story 2.3: FIFO's ``open_lots`` structurally can never go negative
+        — an oversell's shortfall is recorded separately, in
+        ``unmatched_sells``, never merged back into ``open_lots``. Since
+        the average-cost clamp was removed, its ``shares`` figure now goes
+        negative for the identical, legitimately-oversold ticker. Comparing
+        bare ``open_lots`` totals against avg-cost's negative-capable
+        ``shares`` would therefore read as a large false divergence for
+        every oversold ticker. Netting each ticker's ``unmatched_sells``
+        shortfall against its ``open_lots`` total first produces a FIFO-side
+        net position directly comparable to avg-cost's ``shares``, including
+        its negative range, before the two are compared.
         """
         fifo_shares = {
             ticker: sum(lot.shares_remaining for lot in lots)
             for ticker, lots in open_lots.items()
         }
+        shortfalls: dict[str, float] = {}
+        for unmatched in unmatched_sells:
+            shortfalls[unmatched.ticker] = (
+                shortfalls.get(unmatched.ticker, 0.0) + unmatched.shares
+            )
         avg_cost_positions = self._trader.get_portfolio(portfolio_id=portfolio_id)
         avg_cost_shares = {p.ticker: p.shares for p in avg_cost_positions}
         mismatched: list[str] = []
-        for ticker in sorted(set(fifo_shares) | set(avg_cost_shares)):
-            fifo_total = fifo_shares.get(ticker, 0.0)
-            avg_total = avg_cost_shares.get(ticker, 0.0)
-            if abs(fifo_total - avg_total) > _EPSILON:
+        all_tickers = set(fifo_shares) | set(avg_cost_shares) | set(shortfalls)
+        for ticker in sorted(all_tickers):
+            fifo_net = round_quantity(
+                fifo_shares.get(ticker, 0.0) - shortfalls.get(ticker, 0.0)
+            )
+            avg_total = round_quantity(avg_cost_shares.get(ticker, 0.0))
+            if abs(fifo_net - avg_total) > QUANTITY_EPSILON:
                 mismatched.append(ticker)
                 logger.warning(
                     "Realised P&L FIFO/avg-cost mismatch for %s: "
-                    "fifo_shares=%.6f avg_cost_shares=%.6f",
+                    "fifo_net_shares=%.8f avg_cost_shares=%.8f",
                     ticker,
-                    fifo_total,
+                    fifo_net,
                     avg_total,
                 )
         return mismatched

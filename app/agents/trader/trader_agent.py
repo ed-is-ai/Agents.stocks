@@ -21,6 +21,7 @@ from pydantic import PrivateAttr
 from app.agents.base import Agent
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
 from app.core.money import Money, MoneyParseError, has_currency_marker, parse_money
+from app.core.quantity import QUANTITY_EPSILON, round_quantity
 from app.core.ticker_identity import (
     HSFWA_TICKER,
     AmbiguousTickerAliasError,
@@ -514,12 +515,20 @@ class TraderAgent(Agent):
         ``open_rows``) and ``import_sipp``'s in-transaction snapshot calc
         (reading via ``open_rows_on_connection``) so both use one
         implementation.
+
+        A fully-closed position (``shares`` within ``QUANTITY_EPSILON`` of
+        0) is excluded -- there is nothing open to show, and a bare
+        ``!= 0`` would let residual float dust from a long replay surface
+        as a phantom near-zero row. A genuinely negative ``shares`` (an
+        oversell whose shortfall was never clamped away, Story 2.3) is
+        deliberately included: it must stay visible and trackable on the
+        Portfolio tab, not vanish the way a `> 0` filter would make it.
         """
         state = TraderAgent._replay_trades(rows)
         return [
             TraderAgent._build_position(ticker, s, current_prices, display_info)
             for ticker, s in state.items()
-            if s["shares"] > 0
+            if abs(s["shares"]) > QUANTITY_EPSILON
         ]
 
     @staticmethod
@@ -574,10 +583,29 @@ class TraderAgent(Agent):
                 }
             s = state[ticker]
             if action == "BUY":
-                new_total = s["shares"] + shares
-                s["avg_cost"] = (
-                    s["avg_cost"] * s["shares"] + price * shares
-                ) / new_total
+                # Story 2.3: `s["shares"]` is kept rounded to the shared 8dp
+                # policy after every update (below), so accumulated float
+                # dust from prior BUY/SELL arithmetic never carries forward
+                # -- this is what makes the zero-crossing check below
+                # reliable, rather than comparing a possibly-dust-laden raw
+                # float against `QUANTITY_EPSILON`.
+                new_total = round_quantity(s["shares"] + shares)
+                # Removing the oversell clamp lets `s["shares"]` be negative
+                # going in, so a BUY can now land `new_total` on exactly 0
+                # -- a position that was oversold and is now exactly closed
+                # out. There is no such thing as a weighted-average cost of
+                # zero shares, so this guard exists purely to avoid a
+                # ZeroDivisionError; it is not the "reset avg_cost on
+                # crossing zero" behavior the spec's Design Notes leave out
+                # of scope, since a flat (0-share) position is filtered out
+                # of every display path regardless of what its avg_cost
+                # holds.
+                if abs(new_total) < QUANTITY_EPSILON:
+                    s["avg_cost"] = 0.0
+                else:
+                    s["avg_cost"] = (
+                        s["avg_cost"] * s["shares"] + price * shares
+                    ) / new_total
                 s["shares"] = new_total
                 if s["entry_date"] is None:
                     s["entry_date"] = trade_date
@@ -586,14 +614,25 @@ class TraderAgent(Agent):
                 if entry_price is not None:
                     s["entry_price"] = entry_price
             else:  # SELL
-                if shares > s["shares"]:
+                # Epsilon-tolerant, not a bare `>` -- a SELL that (within
+                # float precision) exactly matches the held quantity must
+                # never register as an oversell purely from float-arithmetic
+                # dust accumulated across a long replay (mirrors FIFO's own
+                # `remaining_to_sell > QUANTITY_EPSILON` idiom).
+                if shares - s["shares"] > QUANTITY_EPSILON:
+                    # Story 2.3: no longer clamped to 0 -- the shortfall is
+                    # preserved as a negative share count, mirroring FIFO's
+                    # existing UnmatchedSell convention of reporting the
+                    # unconsumed remainder instead of discarding it.
                     logging.getLogger(__name__).warning(
-                        "Oversell for %s: sold %s but only %s held; clamping to 0",
+                        "Oversell for %s: sold %s but only %s held; "
+                        "recording a negative remainder of %s",
                         ticker,
                         shares,
                         s["shares"],
+                        shares - s["shares"],
                     )
-                s["shares"] = max(0.0, s["shares"] - shares)
+                s["shares"] = round_quantity(s["shares"] - shares)
         return state
 
     @staticmethod
@@ -608,6 +647,14 @@ class TraderAgent(Agent):
         For USD stocks, all monetary fields (current_price, current_value,
         unrealised_pnl) are kept in USD so that P&L is self-consistent.
         The web layer converts to GBP for aggregate totals.
+
+        ``shares``/``avg_cost`` are rounded via the shared
+        ``round_quantity`` (8dp round-half-even, Story 2.3) rather than
+        ``round(..., 4)``, unifying average-cost's precision policy with
+        FIFO's. Monetary fields below (``total_cost``, ``current_value``,
+        ``unrealised_pnl``, ``current_price``, profit targets) stay on the
+        pre-existing 2dp ``round()`` -- a distinct typed fact (AD-24), out
+        of this story's scope.
         """
         avg_cost = s["avg_cost"]
         remaining = s["shares"]
@@ -637,8 +684,8 @@ class TraderAgent(Agent):
         pt25 = round(entry_price * 1.25, 2) if entry_price else None
         return Position(
             ticker=ticker,
-            shares=round(remaining, 4),
-            avg_cost=round(avg_cost, 4),
+            shares=round_quantity(remaining),
+            avg_cost=round_quantity(avg_cost),
             current_price=round(cp, 2) if cp is not None else None,
             total_cost=total_cost,
             current_value=current_value,
@@ -1564,16 +1611,22 @@ class TraderAgent(Agent):
         state = self._replay_trades(rows)
         positions = []
 
+        # Story 2.3: epsilon-tolerant (not `> 0` or a bare `!= 0`) so an
+        # oversold, negative-share ticker stays visible on refresh too,
+        # matching `_compute_positions`'s identical fix -- otherwise this
+        # sibling replay path would still silently drop the ticker the
+        # clamp-removal was meant to surface, and a bare `!= 0` would let
+        # residual float dust from a long replay surface as a phantom row.
         missing_tickers = [
             ticker
             for ticker, s in state.items()
-            if s["shares"] > 0 and ticker not in current_prices
+            if abs(s["shares"]) > QUANTITY_EPSILON and ticker not in current_prices
         ]
         if missing_tickers:
             logger.warning(f"Could not fetch prices for: {missing_tickers}")
 
         for ticker, s in state.items():
-            if s["shares"] > 0:
+            if abs(s["shares"]) > QUANTITY_EPSILON:
                 pos = self._build_position(ticker, s, current_prices, display_info)
                 positions.append(pos)
 
