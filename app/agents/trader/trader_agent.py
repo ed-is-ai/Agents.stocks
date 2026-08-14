@@ -10,6 +10,7 @@ import hashlib
 import io
 import logging
 import re
+import uuid
 from datetime import date as _date
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -71,6 +72,12 @@ REQUIRED_SIPP_COLUMNS = (
 
 class SippImportError(ValueError):
     """Raised when a SIPP CSV cannot be imported (e.g. missing columns)."""
+
+
+class OpeningLotDuplicateError(ValueError):
+    """Raised when an Opening Lot entry duplicates an existing one (Story
+    2.4, AC4) -- same canonicalized ticker, ``shares``, and ``date`` already
+    recorded with ``source="opening_lot"`` for this portfolio."""
 
 
 def _to_iso_date(value: str) -> str:
@@ -355,8 +362,14 @@ class TraderAgent(Agent):
         stop_loss: float | None = None,
         entry_price: float | None = None,
         portfolio_id: int | None = None,
+        source: str = "manual",
     ) -> Trade:
-        """Record a buy transaction and return the saved Trade."""
+        """Record a buy transaction and return the saved Trade.
+
+        ``source`` tags this row's provenance (Story 2.4) -- defaults to
+        ``"manual"`` (the generic ``/trades`` BUY form); callers like
+        Quick-Add and the Opening Lot entry path pass their own value.
+        """
         trade_date = (
             _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
         )
@@ -370,6 +383,7 @@ class TraderAgent(Agent):
             stop_loss,
             entry_price,
             portfolio_id,
+            source=source,
         )
         return Trade(
             id=trade_id,
@@ -382,6 +396,7 @@ class TraderAgent(Agent):
             stop_loss=stop_loss,
             entry_price=entry_price,
             portfolio_id=portfolio_id,
+            source=source,
         )
 
     def record_sell(
@@ -392,8 +407,13 @@ class TraderAgent(Agent):
         date: str | None = None,
         notes: str = "",
         portfolio_id: int | None = None,
+        source: str = "manual",
     ) -> Trade:
-        """Record a sell transaction and return the saved Trade."""
+        """Record a sell transaction and return the saved Trade.
+
+        ``source`` tags this row's provenance (Story 2.4) -- defaults to
+        ``"manual"`` (the generic ``/trades`` SELL form).
+        """
         trade_date = (
             _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
         )
@@ -405,6 +425,7 @@ class TraderAgent(Agent):
             trade_date,
             notes,
             portfolio_id=portfolio_id,
+            source=source,
         )
         return Trade(
             id=trade_id,
@@ -415,6 +436,7 @@ class TraderAgent(Agent):
             date=trade_date,
             notes=notes,
             portfolio_id=portfolio_id,
+            source=source,
         )
 
     def correct_trade(
@@ -431,7 +453,9 @@ class TraderAgent(Agent):
         """Overwrite the position for a ticker: delete all trades and insert one BUY.
 
         Scoped to ``portfolio_id`` so correcting a ticker in one account never
-        touches the same ticker held in another.
+        touches the same ticker held in another. Always tags the written row
+        ``source="correction"`` (Story 2.4), regardless of what the
+        replaced trades' provenance was.
         """
         trade_date = (
             _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
@@ -447,6 +471,7 @@ class TraderAgent(Agent):
             stop_loss,
             entry_price,
             portfolio_id,
+            source="correction",
         )
         return Trade(
             id=trade_id,
@@ -459,10 +484,159 @@ class TraderAgent(Agent):
             stop_loss=stop_loss,
             entry_price=entry_price,
             portfolio_id=portfolio_id,
+            source="correction",
         )
 
     def delete_trade(self, trade_id: int) -> bool:
         """Delete a trade by ID. Returns True if a row was deleted."""
+        return self._trades.delete_by_id(trade_id)
+
+    def _opening_lot_duplicate_check(
+        self,
+        canonical_ticker_value: str,
+        shares: float,
+        trade_date: str,
+        portfolio_id: int | None,
+        exclude_trade_id: int | None = None,
+    ) -> None:
+        """Raise ``OpeningLotDuplicateError`` if an Opening Lot with the same
+        canonicalized ticker, ``shares``, and ``date`` already exists for
+        this portfolio (Story 2.4, AC4).
+
+        Shared by ``record_opening_lot`` and ``update_opening_lot``;
+        ``exclude_trade_id`` lets an edit collide-check against every
+        *other* Opening Lot without always rejecting against itself.
+        Distinct from SIPP import's idempotency-key dedup, which has no
+        equivalent content to key on for a manual entry.
+        """
+        for existing in self._trades.history(canonical_ticker_value, portfolio_id):
+            if (
+                existing.id != exclude_trade_id
+                and existing.source == "opening_lot"
+                and existing.action == "BUY"
+                and existing.date == trade_date
+                and abs(existing.shares - shares) <= QUANTITY_EPSILON
+            ):
+                raise OpeningLotDuplicateError(
+                    f"An Opening Lot for {canonical_ticker_value} on "
+                    f"{trade_date} with {shares:g} shares already exists."
+                )
+
+    def record_opening_lot(
+        self,
+        ticker: str,
+        shares: float,
+        price: float,
+        date: str,
+        notes: str = "",
+        portfolio_id: int | None = None,
+    ) -> Trade:
+        """Record a manual Opening Lot (Story 2.4).
+
+        A BUY trade tagged ``source="opening_lot"`` -- reuses the exact
+        insert path an imported Buy uses, so it participates in FIFO and
+        average-cost replay identically (AC3), including in the Match
+        Trace. Rejects (``OpeningLotDuplicateError``) a duplicate entry --
+        same canonicalized ticker, ``shares``, and ``date`` already
+        recorded as an Opening Lot for this portfolio (AC4) -- before any
+        write.
+        """
+        canonical = canonicalize_or_fallback(
+            ticker.upper(), load_aliases(), logger=logger, context="record_opening_lot"
+        )
+        trade_date = (
+            _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
+        )
+        self._opening_lot_duplicate_check(canonical, shares, trade_date, portfolio_id)
+        trade_id = self._trades.insert(
+            canonical,
+            "BUY",
+            shares,
+            price,
+            trade_date,
+            notes,
+            portfolio_id=portfolio_id,
+            source="opening_lot",
+        )
+        return Trade(
+            id=trade_id,
+            ticker=canonical,
+            action="BUY",
+            shares=shares,
+            price=price,
+            date=trade_date,
+            notes=notes,
+            portfolio_id=portfolio_id,
+            source="opening_lot",
+        )
+
+    def update_opening_lot(
+        self,
+        trade_id: int,
+        ticker: str,
+        shares: float,
+        price: float,
+        date: str,
+        notes: str = "",
+        portfolio_id: int | None = None,
+    ) -> Trade:
+        """Edit an existing Opening Lot's fields in place (Story 2.4).
+
+        Re-runs the same duplicate check as ``record_opening_lot``,
+        excluding the row being edited itself, so an edit that collides
+        with a *different* Opening Lot is still rejected (AC4). The
+        caller (the route) is responsible for the consumed/unconsumed gate
+        (AC7/AC8, via ``RealisedPnlService.opening_lot_status``) before
+        calling this -- this performs the write unconditionally once
+        called. Raises ``ValueError`` if no Opening Lot with ``trade_id``
+        exists for this portfolio.
+        """
+        canonical = canonicalize_or_fallback(
+            ticker.upper(), load_aliases(), logger=logger, context="update_opening_lot"
+        )
+        trade_date = (
+            _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
+        )
+        self._opening_lot_duplicate_check(
+            canonical, shares, trade_date, portfolio_id, exclude_trade_id=trade_id
+        )
+        updated = self._trades.update_opening_lot(
+            trade_id, canonical, shares, price, trade_date, notes, portfolio_id
+        )
+        if not updated:
+            raise ValueError(
+                f"No Opening Lot with id={trade_id} exists for this portfolio."
+            )
+        return Trade(
+            id=trade_id,
+            ticker=canonical,
+            action="BUY",
+            shares=shares,
+            price=price,
+            date=trade_date,
+            notes=notes,
+            portfolio_id=portfolio_id,
+            source="opening_lot",
+        )
+
+    def delete_opening_lot(
+        self, trade_id: int, portfolio_id: int | None = None
+    ) -> bool:
+        """Delete an Opening Lot by id, scoped to ``portfolio_id``.
+
+        Only deletes a row that is in fact ``source="opening_lot"``
+        (defense in depth so this Opening-Lot-specific path can never
+        delete an unrelated trade). The caller (the route) is responsible
+        for the consumed/unconsumed gate (AC7/AC8) before calling this.
+        Returns True if a row was deleted.
+        """
+        history = self._trades.history(portfolio_id=portfolio_id)
+        target = next(
+            (t for t in history if t.id == trade_id and t.source == "opening_lot"),
+            None,
+        )
+        if target is None:
+            return False
         return self._trades.delete_by_id(trade_id)
 
     def get_trade_history(
@@ -826,6 +1000,10 @@ class TraderAgent(Agent):
         # until every row has been evaluated).
         planned_trades: list[tuple[Any, ...]] = []
         planned_cash_flows: list[tuple[Any, ...]] = []
+        # Story 2.4: one fresh id per import call, stamped on every trade
+        # this call writes -- traces a sell (or any trade) back to the
+        # specific import that produced it.
+        import_batch_id = uuid.uuid4().hex
         # Rows with genuinely no signal (no quantity, no debit/credit, no
         # parse error) -- counted toward the row-count reconciliation below
         # so a benign informational row never falsely flags status="error",
@@ -1112,6 +1290,8 @@ class TraderAgent(Agent):
                                             if price_money
                                             else "GBP",
                                             idx,
+                                            "sipp_import",
+                                            import_batch_id,
                                         )
                                     )
                                     classify(idempotency_key, existing_trade_keys)

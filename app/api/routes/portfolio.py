@@ -10,10 +10,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse
 
-from app.agents.trader.trader_agent import SippImportError
+from app.agents.trader.trader_agent import OpeningLotDuplicateError, SippImportError
 from app.api.dependencies import (
     get_notifications_repository,
     get_portfolio_service,
+    get_realised_pnl_service,
     get_trader_service,
 )
 from app.api.params import optional_int
@@ -27,6 +28,7 @@ from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.services.portfolio_service import PortfolioService
+from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
 
 router = APIRouter()
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
+RealisedPnlDep = Annotated[RealisedPnlService, Depends(get_realised_pnl_service)]
 NotificationsDep = Annotated[
     NotificationsRepository, Depends(get_notifications_repository)
 ]
@@ -517,6 +520,7 @@ async def quick_add_holding(
             date or None,
             notes=f"Quick-add: £{value:,.2f} @ £{gbp_price:g}/share",
             portfolio_id=pid,
+            source="quick_add",
         )
     except Exception as e:
         logger.exception("Quick-add failed for %s: %s", ticker, e)
@@ -558,4 +562,198 @@ async def reconciliation_view(
         request,
         "_reconciliation.html",
         context={"issues": issues, "portfolio_id": portfolio_id},
+    )
+
+
+# --- Opening Lots (Story 2.4) -----------------------------------------------
+
+
+def _opening_lot_error(
+    request: Request,
+    portfolio: PortfolioService,
+    message: str,
+    portfolio_id: int | None,
+) -> HTMLResponse:
+    """Render the portfolio partial with an Opening Lot error banner --
+    mirrors ``_quick_add_error``'s shape for this feature's own validation
+    failures (duplicate entry, consumed lot, unknown portfolio)."""
+    context = portfolio.default_portfolio_context(portfolio_id)
+    context["error_message"] = message
+    return templates.TemplateResponse(
+        request, "_portfolio.html", context=context, status_code=400
+    )
+
+
+@router.post(
+    "/portfolio/opening-lot",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def create_opening_lot(
+    request: Request,
+    trader: TraderDep,
+    portfolio: PortfolioDep,
+    ticker: Annotated[str, Form()],
+    shares: Annotated[float, Form()],
+    price: Annotated[float, Form()],
+    date: Annotated[str, Form()],
+    notes: Annotated[str, Form()] = "",
+    portfolio_id: Annotated[str | None, Form()] = None,
+) -> HTMLResponse:
+    """Record a manual Opening Lot (Story 2.4, AC3/AC4/AC5).
+
+    A BUY trade tagged ``source="opening_lot"`` -- participates in FIFO
+    and average-cost replay exactly like an imported Buy, including in the
+    Match Trace (AC3). Rejects a duplicate entry (same canonicalized
+    ticker/shares/date already recorded as an Opening Lot for this
+    portfolio, AC4) with an error banner and no write. On success, the
+    very next ``compute_summary()`` call (e.g. opening the Realised P&L
+    tab) already reflects the fresh lot -- no separate re-match step
+    (AC5), since that service recomputes from live trade data on every
+    call.
+    """
+    pid = optional_int(portfolio_id)
+    if pid is None or not trader.portfolio_exists(pid):
+        return _opening_lot_error(
+            request,
+            portfolio,
+            "Select a portfolio first (create one if you have none).",
+            pid,
+        )
+    ticker = ticker.strip().upper()
+    if not ticker or shares <= 0 or price <= 0:
+        return _opening_lot_error(
+            request, portfolio, "Enter a ticker and a positive shares/price.", pid
+        )
+    try:
+        trader.record_opening_lot(ticker, shares, price, date, notes, pid)
+    except OpeningLotDuplicateError as exc:
+        return _opening_lot_error(request, portfolio, str(exc), pid)
+
+    context = portfolio.default_portfolio_context(pid)
+    context["import_message"] = (
+        f"Added Opening Lot: {shares:g} share(s) of {ticker} @ {price:g}."
+    )
+    logger.info("Opening Lot recorded: %s x%.4f @ %.4f", ticker, shares, price)
+    return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+@router.post(
+    "/portfolio/opening-lot/{trade_id}/edit",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def edit_opening_lot(
+    request: Request,
+    trade_id: int,
+    trader: TraderDep,
+    portfolio: PortfolioDep,
+    realised_pnl: RealisedPnlDep,
+    ticker: Annotated[str, Form()],
+    shares: Annotated[float, Form()],
+    price: Annotated[float, Form()],
+    date: Annotated[str, Form()],
+    notes: Annotated[str, Form()] = "",
+    portfolio_id: Annotated[str | None, Form()] = None,
+) -> HTMLResponse:
+    """Edit an existing Opening Lot's fields (Story 2.4, AC7/AC8).
+
+    Gated on a fresh consumed/unconsumed check
+    (``RealisedPnlService.opening_lot_status`` -- never a persisted
+    column): an Opening Lot with any part already matched against a sell
+    is rejected with a clear error and no mutation, not a silent no-op.
+    """
+    pid = optional_int(portfolio_id)
+    if pid is None or not trader.portfolio_exists(pid):
+        return _opening_lot_error(request, portfolio, "Select a portfolio first.", pid)
+    ticker = ticker.strip().upper()
+    if not ticker or shares <= 0 or price <= 0:
+        return _opening_lot_error(
+            request, portfolio, "Enter a ticker and a positive shares/price.", pid
+        )
+    status = realised_pnl.opening_lot_status(trade_id, pid)
+    if status is None:
+        return _opening_lot_error(
+            request, portfolio, "This Opening Lot no longer exists.", pid
+        )
+    if status != "unconsumed":
+        return _opening_lot_error(
+            request,
+            portfolio,
+            "This Opening Lot has already been matched against a sell and "
+            "can no longer be edited.",
+            pid,
+        )
+    try:
+        trader.update_opening_lot(trade_id, ticker, shares, price, date, notes, pid)
+    except (OpeningLotDuplicateError, ValueError) as exc:
+        return _opening_lot_error(request, portfolio, str(exc), pid)
+
+    context = portfolio.default_portfolio_context(pid)
+    context["import_message"] = "Opening Lot updated."
+    return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+@router.delete(
+    "/portfolio/opening-lot/{trade_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def delete_opening_lot(
+    request: Request,
+    trade_id: int,
+    trader: TraderDep,
+    portfolio: PortfolioDep,
+    realised_pnl: RealisedPnlDep,
+    portfolio_id: str | None = None,
+) -> HTMLResponse:
+    """Delete an Opening Lot (Story 2.4, AC7/AC8).
+
+    Gated on the same fresh consumed/unconsumed check as
+    ``edit_opening_lot`` -- a consumed lot is rejected with a clear error,
+    never silently ignored.
+    """
+    pid = optional_int(portfolio_id)
+    if pid is None or not trader.portfolio_exists(pid):
+        return _opening_lot_error(request, portfolio, "Select a portfolio first.", pid)
+    status = realised_pnl.opening_lot_status(trade_id, pid)
+    if status is None:
+        return _opening_lot_error(
+            request, portfolio, "This Opening Lot no longer exists.", pid
+        )
+    if status != "unconsumed":
+        return _opening_lot_error(
+            request,
+            portfolio,
+            "This Opening Lot has already been matched against a sell and "
+            "can no longer be deleted.",
+            pid,
+        )
+    trader.delete_opening_lot(trade_id, pid)
+    context = portfolio.default_portfolio_context(pid)
+    context["import_message"] = "Opening Lot deleted."
+    return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+@router.get(
+    "/portfolio/{portfolio_id}/match-trace/{trade_id}", response_class=HTMLResponse
+)
+async def match_trace_view(
+    request: Request,
+    portfolio_id: int,
+    trade_id: int,
+    realised_pnl: RealisedPnlDep,
+) -> HTMLResponse:
+    """The dedicated Match Trace detail view (Story 2.4) -- the full FIFO
+    match explanation for one SELL (identity, candidate lots, ordering
+    decision, skipped-date rows, source/import batch), alongside the
+    existing coarse ``UnmatchedSell`` summary list. Mirrors the
+    reconciliation view's shape (Story 1.5): a thin service passthrough,
+    read-only (no ``require_local_or_token``, matching that view).
+    """
+    trace = realised_pnl.get_match_trace(trade_id, portfolio_id)
+    return templates.TemplateResponse(
+        request,
+        "_match_trace.html",
+        context={"trace": trace, "portfolio_id": portfolio_id, "trade_id": trade_id},
     )
