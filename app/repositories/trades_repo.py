@@ -19,6 +19,25 @@ logger = logging.getLogger(__name__)
 _DATE_SORT = "date"
 _REPLAY_COLUMNS = "ticker, action, shares, price, date, stop_loss, entry_price"
 
+# Story 2.2: deterministic same-day replay order, applied identically to
+# average-cost (here, in SQL) and FIFO (``RealisedPnlService._sorted_valid_
+# trades``, in Python). Within one imported file the first-listed CSV row is
+# the most recent execution of that day, so chronological (oldest-first)
+# replay must process the *highest* ``source_row_index`` first within a date
+# group -- hence ``DESC``. ``source_row_index IS NULL`` (rows imported before
+# this story shipped) is coalesced to ``-1``, the lowest possible position,
+# so such a row always replays last among same-day peers. The next tiebreak
+# is the content-derived ``idempotency_key`` -- never an import-timing
+# signal. A trailing ``id`` guarantees a fully deterministic order even when
+# both of the above are NULL (e.g. two same-day trades recorded manually via
+# ``insert()`` rather than SIPP import, which sets neither column) -- this
+# mirrors ``RealisedPnlService._replay_sort_key``'s identical fallback and
+# restores the same guarantee the pre-Story-2.2 ``ORDER BY date, id`` gave
+# every row, not only imported ones.
+_REPLAY_ORDER = (
+    f"{_DATE_SORT}, COALESCE(source_row_index, -1) DESC, idempotency_key, id"
+)
+
 
 def _in_placeholders(values: Iterable[Any]) -> str:
     """Return a ``"?, ?, ..."`` placeholder string, one per value.
@@ -43,6 +62,8 @@ def _row_to_trade(row: tuple[Any, ...]) -> Trade:
         portfolio_id=row[9] if len(row) > 9 else None,
         realised_pnl_ack_at=row[10] if len(row) > 10 else None,
         currency=row[11] if len(row) > 11 and row[11] is not None else "GBP",
+        source_row_index=row[12] if len(row) > 12 else None,
+        idempotency_key=row[13] if len(row) > 13 else None,
     )
 
 
@@ -99,12 +120,19 @@ class TradesRepository:
         portfolio_id: int | None = None,
         idempotency_key: str | None = None,
         currency: str = "GBP",
+        source_row_index: int | None = None,
     ) -> SippImportRowOutcome:
         """Insert a trade with ``INSERT OR IGNORE`` on the given connection.
 
         Used by the SIPP import, which batches many rows in one transaction.
         Dedupe is keyed on ``(portfolio_id, idempotency_key)`` so the same
         CSV can import into different portfolios independently.
+
+        ``source_row_index`` is the row's 0-based position within its own
+        source CSV file (Story 2.2) — used, together with
+        ``idempotency_key``, to deterministically order same-day trades for
+        FIFO/average-cost replay. ``None`` for rows imported before this
+        story shipped.
 
         Returns the row's actual outcome: ``"inserted"`` when the row was
         written, ``"duplicate"`` when the unique index silently suppressed
@@ -113,8 +141,9 @@ class TradesRepository:
         """
         cur = conn.execute(
             "INSERT OR IGNORE INTO trades "
-            "(ticker, action, shares, price, date, notes, reference, portfolio_id, idempotency_key, currency) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(ticker, action, shares, price, date, notes, reference, portfolio_id,"
+            " idempotency_key, currency, source_row_index) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ticker,
                 action,
@@ -126,6 +155,7 @@ class TradesRepository:
                 portfolio_id,
                 idempotency_key,
                 currency,
+                source_row_index,
             ),
         )
         return "inserted" if cur.rowcount else "duplicate"
@@ -206,7 +236,8 @@ class TradesRepository:
         aliases = load_aliases()
         base = (
             "SELECT id, ticker, action, shares, price, date, notes, stop_loss,"
-            " entry_price, portfolio_id, realised_pnl_ack_at, currency FROM trades"
+            " entry_price, portfolio_id, realised_pnl_ack_at, currency,"
+            " source_row_index, idempotency_key FROM trades"
         )
         order = f"{_DATE_SORT} DESC, id DESC"
         clauses: list[str] = []
@@ -234,7 +265,10 @@ class TradesRepository:
 
         Columns: (ticker, action, shares, price, date, stop_loss, entry_price).
         Excludes blank/``n/a`` tickers, matching the legacy portfolio query.
-        Scoped to ``portfolio_id`` when given.
+        Scoped to ``portfolio_id`` when given. Ordered by ``_REPLAY_ORDER``
+        (Story 2.2): date ascending, then same-day rows deterministically by
+        descending ``source_row_index`` (NULL-safe), then ``idempotency_key``
+        as the cross-file tiebreak.
         """
         sql = (
             f"SELECT {_REPLAY_COLUMNS} FROM trades"
@@ -244,7 +278,7 @@ class TradesRepository:
         if portfolio_id is not None:
             sql += " AND portfolio_id = ?"
             params = (portfolio_id,)
-        sql += f" ORDER BY {_DATE_SORT}, id"
+        sql += f" ORDER BY {_REPLAY_ORDER}"
         with session(self._connect) as conn:
             return conn.execute(sql, params).fetchall()
 
@@ -253,9 +287,10 @@ class TradesRepository:
     ) -> list[tuple[Any, ...]]:
         """Return valid-ticker trade rows for replay on the caller's connection.
 
-        Identical query to ``open_rows`` but executed against the caller's
-        open connection instead of a fresh one — used by the SIPP import so
-        its in-transaction snapshot calculation sees this transaction's own
+        Identical query (including ``_REPLAY_ORDER``, Story 2.2) to
+        ``open_rows`` but executed against the caller's open connection
+        instead of a fresh one — used by the SIPP import so its
+        in-transaction snapshot calculation sees this transaction's own
         not-yet-committed trade inserts (a separate connection would only
         see the database's last *committed* state and silently miss them).
         """
@@ -267,7 +302,7 @@ class TradesRepository:
         if portfolio_id is not None:
             sql += " AND portfolio_id = ?"
             params = (portfolio_id,)
-        sql += f" ORDER BY {_DATE_SORT}, id"
+        sql += f" ORDER BY {_REPLAY_ORDER}"
         return conn.execute(sql, params).fetchall()
 
     def held_tickers(self) -> set[str]:

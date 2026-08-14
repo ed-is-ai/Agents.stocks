@@ -1669,3 +1669,99 @@ def test_replay_trades_cross_spelling_merges_into_one_position(
     assert len(portfolio) == 1
     assert portfolio[0].ticker == "ABC"
     assert portfolio[0].shares == 15.0
+
+
+# --- Story 2.2: deterministic replay ordering -------------------------------
+
+
+def test_import_sipp_persists_source_row_index_matching_csv_position(
+    tmp_path: Path,
+) -> None:
+    """Each inserted trade's ``source_row_index`` matches its 0-based
+    position within its own source CSV file -- the only place a row's file
+    position is known, so it must be captured at insert time."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,4000.00\n"
+        "03/02/2024,AAPL,B123,3,105.00,Sell AAPL,REF-C,,315.00,4315.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert result.status == "ok"
+    # Insertion order (ascending id) matches CSV row order exactly -- each
+    # row's persisted source_row_index must equal its own 0-based position.
+    by_insertion_order = sorted(agent._trades.history(), key=lambda t: t.id or 0)
+    assert [t.source_row_index for t in by_insertion_order] == [0, 1, 2]
+
+
+def test_replay_trades_skips_unparseable_date_row_log_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Average-cost replay (``_replay_trades``) skips a row with an
+    unparseable date, mirroring FIFO's existing skip (Story 2.2) --
+    log-only, no retrievable-data surface, no crash."""
+    import logging
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("GOOD", "BUY", 10.0, 100.0, "2026-01-01")
+    agent._trades.insert("BAD", "BUY", 5.0, 50.0, "not-a-date")
+
+    with caplog.at_level(logging.WARNING):
+        portfolio = agent.get_portfolio()
+
+    assert {p.ticker for p in portfolio} == {"GOOD"}
+    assert any(
+        "unparseable" in r.message.lower() and "BAD" in r.message
+        for r in caplog.records
+    )
+
+
+def test_replay_trades_null_source_row_index_does_not_crash(tmp_path: Path) -> None:
+    """A pre-Story-2.2 row (``source_row_index IS NULL``, simulated via a
+    direct insert bypassing the SIPP import) still replays without
+    crashing -- the NULL sentinel is a SQL-level ``ORDER BY`` concern
+    (``open_rows``), never a ``_replay_trades`` unpacking concern."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("TEST1", "BUY", 10.0, 100.0, "2026-01-01")
+
+    portfolio = agent.get_portfolio()
+
+    assert {p.ticker for p in portfolio} == {"TEST1"}
+
+
+def test_same_day_one_file_avg_cost_processes_last_listed_row_first(
+    tmp_path: Path,
+) -> None:
+    """I/O matrix: two same-ticker, same-date rows in one CSV, listed
+    [most-recent, earliest] -- average-cost replay processes the earliest
+    (last-listed) row first. Encoded here as a SELL listed first (most
+    recent) and a BUY listed second (earliest): correct ordering replays
+    the BUY before the SELL, fully closing the position (0 shares, filtered
+    out of the portfolio); the old id/insertion-order bug would instead
+    process the SELL first (an oversell, clamped to 0) and then the BUY,
+    leaving 5 shares open."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/03/2024,ORDX,S001,5,150.00,Sell ORDX,REF-SELL,,750.00,5750.00\n"
+        "01/03/2024,ORDX,S001,5,100.00,Buy ORDX,REF-BUY,500.00,,5000.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+    assert result.status == "ok"
+
+    portfolio = agent.get_portfolio()
+    assert all(p.ticker != "ORDX" for p in portfolio)

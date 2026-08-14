@@ -248,6 +248,137 @@ def test_trades_set_ack_writes_and_clears(trades_connect):
     assert history[target_id].realised_pnl_ack_at is None
 
 
+# --- Story 2.2: deterministic replay ordering -------------------------------
+
+
+def test_trades_insert_ignore_persists_source_row_index(trades_connect):
+    """``source_row_index`` (the row's 0-based position in its source CSV)
+    round-trips through ``insert_ignore`` into ``history()`` -- the only
+    place a row's file position is captured, so it must survive the write."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn,
+            "AAPL",
+            "BUY",
+            10,
+            100.0,
+            "2024-01-02",
+            "",
+            "REF1",
+            None,
+            "key-1",
+            "GBP",
+            3,
+        )
+    trade = repo.history()[0]
+    assert trade.source_row_index == 3
+    assert trade.idempotency_key == "key-1"
+
+
+def test_trades_insert_ignore_source_row_index_defaults_to_none(trades_connect):
+    """A caller that doesn't pass ``source_row_index`` (every pre-Story-2.2
+    call site) still inserts cleanly, with the column left ``NULL``."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn, "AAPL", "BUY", 10, 100.0, "2024-01-02", "", "REF1", None, "key-1"
+        )
+    trade = repo.history()[0]
+    assert trade.source_row_index is None
+
+
+def test_trades_open_rows_orders_same_day_by_descending_source_row_index(
+    trades_connect,
+):
+    """Story 2.2: within a same-day group, ``open_rows`` (average-cost
+    replay) processes the *highest* ``source_row_index`` first --
+    the first-listed CSV row (lowest index) is the most recent execution of
+    that day, so chronological (oldest-first) replay must reach it last."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        # idx 0 = first-listed/most-recent; idx 2 = last-listed/earliest.
+        repo.insert_ignore(
+            conn,
+            "MOSTRECENT",
+            "BUY",
+            1,
+            10.0,
+            "2024-01-02",
+            "",
+            None,
+            None,
+            "k0",
+            "GBP",
+            0,
+        )
+        repo.insert_ignore(
+            conn, "MIDDLE", "BUY", 1, 10.0, "2024-01-02", "", None, None, "k1", "GBP", 1
+        )
+        repo.insert_ignore(
+            conn,
+            "EARLIEST",
+            "BUY",
+            1,
+            10.0,
+            "2024-01-02",
+            "",
+            None,
+            None,
+            "k2",
+            "GBP",
+            2,
+        )
+    rows = repo.open_rows()
+    assert [r[0] for r in rows] == ["EARLIEST", "MIDDLE", "MOSTRECENT"]
+
+
+def test_trades_open_rows_null_source_row_index_sorts_last_in_date_group(
+    trades_connect,
+):
+    """A pre-Story-2.2 row (``source_row_index IS NULL``, simulated via
+    plain ``insert()``) participates in replay without crashing, and sorts
+    as the lowest possible position in its date group -- last among
+    same-day peers with a real index."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("NOINDEX", "BUY", 1, 10.0, "2024-01-02")  # source_row_index NULL
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn,
+            "HASINDEX",
+            "BUY",
+            1,
+            10.0,
+            "2024-01-02",
+            "",
+            None,
+            None,
+            "k0",
+            "GBP",
+            0,
+        )
+    rows = repo.open_rows()
+    assert [r[0] for r in rows] == ["HASINDEX", "NOINDEX"]
+
+
+def test_trades_open_rows_both_source_row_index_and_idempotency_key_null_falls_back_to_id(
+    trades_connect,
+):
+    """Two same-day rows with both ``source_row_index`` and
+    ``idempotency_key`` NULL -- e.g. two trades recorded manually via
+    ``insert()`` rather than SIPP import, which sets neither column --
+    must still sort deterministically by ascending ``id``, exactly like
+    ``RealisedPnlService._replay_sort_key``'s identical fallback and the
+    pre-Story-2.2 ``ORDER BY date, id`` this replaces. Without a trailing
+    ``id`` tiebreak in ``_REPLAY_ORDER``, this tie would fall back to
+    unspecified SQLite ordering."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("FIRST", "BUY", 1, 10.0, "2024-01-02")
+    repo.insert("SECOND", "BUY", 1, 10.0, "2024-01-02")
+    rows = repo.open_rows()
+    assert [r[0] for r in rows] == ["FIRST", "SECOND"]
+
+
 # --- CashFlowsRepository ---------------------------------------------------
 
 
