@@ -5,14 +5,20 @@ writes against -- plus the immutable ``Signal``/``PortfolioView`` value
 objects and the pure result validators a future engine (Story 2.4) calls
 before it changes any cash, position, ledger, staging, or run state.
 
+Story 2.2 adds the closed parameter-schema model
+(:class:`StrategyParameterV1`) and the one shared
+:func:`validate_strategy_parameters` authority that Skill discovery
+(``skill_discovery.py``), a future engine launch, and a future UI all
+reuse verbatim -- never a second validator.
+
 Scope boundary: this module owns only the minimum typing surface Stories
 2.2-2.4 build on. It does not define the concrete pandas-backed
-``MarketView`` (Story 2.3), ``SKILL.md`` frontmatter discovery or a shared
-parameter validator (Story 2.2), or any engine invocation order/state
-mutation (Story 2.4). No type here accepts or returns a database
-connection, repository, ORM/session, job, run, or persistence model, and
-none of them may be imported anywhere near a Strategy runtime module --
-that boundary is mechanically enforced by
+``MarketView`` (Story 2.3), ``SKILL.md`` frontmatter discovery itself
+(Story 2.2's ``skill_discovery.py`` owns that), or any engine invocation
+order/state mutation (Story 2.4). No type here accepts or returns a
+database connection, repository, ORM/session, job, run, or persistence
+model, and none of them may be imported anywhere near a Strategy runtime
+module -- that boundary is mechanically enforced by
 ``tests/backtest/test_strategy_runtime_import_boundary.py``.
 """
 
@@ -21,7 +27,9 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
-from typing import Mapping, Protocol, runtime_checkable
+import math
+from types import MappingProxyType
+from typing import Literal, Mapping, Protocol, Sequence, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -41,6 +49,7 @@ class StrategyProtocolErrorCode(StrEnum):
     FUTURE_DATED_OBSERVATION = "future_dated_observation"
     DUPLICATE_POSITION = "duplicate_position"
     DUPLICATE_VOLATILITY_OBSERVATION = "duplicate_volatility_observation"
+    DUPLICATE_PARAMETER_DECLARATION = "duplicate_parameter_declaration"
 
 
 class StrategyProtocolError(Exception):
@@ -351,14 +360,361 @@ def validate_position_size(value: object) -> int:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Parameter schema and the shared parameter validator (Story 2.2)
+# ---------------------------------------------------------------------------
+
+#: The closed set of parameter value shapes a Strategy's ``SKILL.md``
+#: frontmatter may declare. Kept as a ``Literal`` (matching
+#: ``historical_scan_record.DetectorId``'s ``Literal`` + companion tuple
+#: convention) rather than a ``StrEnum`` because parameter *type* is a
+#: closed value vocabulary embedded inside a strict model field, not a
+#: standalone importable symbol callers construct by name.
+ParameterType = Literal["integer", "number", "boolean", "string", "enum"]
+
+#: Kept in sync with :data:`ParameterType` by hand -- mirrors
+#: ``historical_scan_record.DETECTOR_IDS``' role alongside ``DetectorId``.
+PARAMETER_TYPES: tuple[ParameterType, ...] = (
+    "integer",
+    "number",
+    "boolean",
+    "string",
+    "enum",
+)
+
+_NUMERIC_PARAMETER_TYPES = frozenset({"integer", "number"})
+
+
+class ParameterValidationErrorCode(StrEnum):
+    """Stable, machine-readable :func:`validate_strategy_parameters` codes.
+
+    Kept as a sibling to :class:`StrategyProtocolErrorCode` rather than a
+    shared enum: the existing codes describe protocol-boundary result
+    failures (signals/position size/portfolio construction), while these
+    describe per-submission parameter *field* failures returned inside a
+    :class:`ParameterFieldErrorV1` -- a different failure surface with its
+    own stable vocabulary, matching this module's one-`StrEnum`-per-
+    failure-surface convention.
+    """
+
+    MISSING_REQUIRED = "missing_required"
+    UNKNOWN_FIELD = "unknown_field"
+    INVALID_TYPE = "invalid_type"
+    BELOW_MINIMUM = "below_minimum"
+    ABOVE_MAXIMUM = "above_maximum"
+    NOT_IN_ENUM = "not_in_enum"
+    NON_FINITE_VALUE = "non_finite_value"
+
+
+class StrategyParameterV1(_StrategyModel):
+    """One declared parameter in a Strategy's parameter schema.
+
+    Every schema-*authoring* invariant is enforced here, at construction
+    time, as a genuine schema bug rather than an ordinary per-submission
+    field error: ``minimum``/``maximum`` are only meaningful for
+    ``integer``/``number`` parameters and must satisfy ``minimum <=
+    maximum`` when both are given; ``enum_values`` are only meaningful for
+    ``enum`` parameters and must be a non-empty, duplicate-free,
+    *homogeneous* tuple of scalars (a ``bool`` is never treated as
+    interchangeable with an ``int``, so ``enum_values`` can never silently
+    mix ``True``/``1``); ``default`` must have the shape of the declared
+    ``type`` (or, for ``enum``, be an exact type-and-value member of
+    ``enum_values``); and no numeric bound or numeric default may be
+    non-finite (``NaN``/``Infinity``).
+
+    Deliberately NOT checked here: whether a numeric ``default`` actually
+    falls within a declared ``minimum``/``maximum`` range. That is a
+    value-vs-constraint question answered uniformly by
+    :func:`validate_strategy_parameters` for both a Strategy's own
+    declared defaults (Skill discovery calls it with ``apply_defaults=
+    True`` against an empty submission) and any future caller-submitted
+    value -- so there is exactly one authority for it, and an out-of-range
+    declared default surfaces as Skill discovery's ``invalid_defaults``
+    warning rather than as a construction-time exception here.
+
+    ``name`` uniqueness is a *schema*-level invariant (no two parameters
+    in one schema may share a name), not a per-parameter one, so it is
+    enforced by :func:`validate_strategy_parameters` against the whole
+    ``Sequence[StrategyParameterV1]`` it receives, not by this model.
+    """
+
+    name: str = Field(min_length=1)
+    type: ParameterType
+    default: JsonScalar
+    description: str = Field(min_length=1)
+    required: bool
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    enum_values: tuple[JsonScalar, ...] | None = None
+
+    @model_validator(mode="after")
+    def _numeric_constraints(self) -> "StrategyParameterV1":
+        is_numeric = self.type in _NUMERIC_PARAMETER_TYPES
+        if not is_numeric and (self.minimum is not None or self.maximum is not None):
+            raise ValueError(
+                "minimum/maximum are only valid for integer or number parameters"
+            )
+        # Belt-and-suspenders: the field's own ``int | float | None`` type
+        # under this model's ``strict=True``/``allow_inf_nan=False`` config
+        # already rejects a bool or a non-finite float before this
+        # validator ever runs. These checks stay only as an explicit,
+        # readable statement of the invariant if that field typing ever
+        # changes.
+        for bound in (self.minimum, self.maximum):
+            if isinstance(bound, bool):
+                raise ValueError("minimum/maximum cannot be a bool")
+            if isinstance(bound, float) and not math.isfinite(bound):
+                raise ValueError("minimum/maximum cannot be non-finite")
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
+            raise ValueError("minimum cannot exceed maximum")
+        return self
+
+    @model_validator(mode="after")
+    def _enum_values(self) -> "StrategyParameterV1":
+        if self.type != "enum":
+            if self.enum_values is not None:
+                raise ValueError("enum_values is only valid for enum parameters")
+            return self
+        if not self.enum_values:
+            raise ValueError("enum parameters require a non-empty enum_values")
+        if any(value is None for value in self.enum_values):
+            raise ValueError("enum_values cannot contain null")
+        first_type = type(self.enum_values[0])
+        if any(type(value) is not first_type for value in self.enum_values):
+            raise ValueError(
+                "enum_values must be homogeneous (no mixed types, "
+                "including bool vs int)"
+            )
+        if len(set(self.enum_values)) != len(self.enum_values):
+            raise ValueError("enum_values cannot contain duplicates")
+        return self
+
+    @model_validator(mode="after")
+    def _default_matches_declared_type(self) -> "StrategyParameterV1":
+        default = self.default
+        if self.type == "integer":
+            valid_shape = isinstance(default, int) and not isinstance(default, bool)
+        elif self.type == "number":
+            valid_shape = isinstance(default, (int, float)) and not isinstance(
+                default, bool
+            )
+        elif self.type == "boolean":
+            valid_shape = isinstance(default, bool)
+        elif self.type == "string":
+            valid_shape = isinstance(default, str)
+        else:  # "enum"
+            valid_shape = self.enum_values is not None and any(
+                type(default) is type(candidate) and default == candidate
+                for candidate in self.enum_values
+            )
+        if not valid_shape:
+            raise ValueError(f"default {default!r} is not a valid {self.type} value")
+        # Belt-and-suspenders: ``default: JsonScalar``'s own field typing
+        # under ``allow_inf_nan=False`` already rejects a non-finite float
+        # before this validator runs; kept as an explicit statement of the
+        # invariant, matching ``_numeric_constraints`` above.
+        if isinstance(default, float) and not math.isfinite(default):
+            raise ValueError("default cannot be non-finite (NaN/Infinity)")
+        return self
+
+
+class ParameterFieldErrorV1(_StrategyModel):
+    """One structured, machine-readable parameter-validation failure.
+
+    Returned (never raised) by :func:`validate_strategy_parameters` for
+    every ordinary per-submission problem, matching this module's
+    established convention that pure ``validate_*`` functions return
+    structured results for result checking rather than raise.
+    """
+
+    parameter_name: str = Field(min_length=1)
+    code: ParameterValidationErrorCode
+    message: str = Field(min_length=1)
+
+
+def _numeric_value_error(
+    parameter: StrategyParameterV1, value: int | float
+) -> ParameterFieldErrorV1 | None:
+    """Validate a submitted ``integer``/``number`` value against bounds."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return ParameterFieldErrorV1(
+            parameter_name=parameter.name,
+            code=ParameterValidationErrorCode.NON_FINITE_VALUE,
+            message=f"{parameter.name!r} cannot be NaN/Infinity",
+        )
+    if parameter.minimum is not None and value < parameter.minimum:
+        return ParameterFieldErrorV1(
+            parameter_name=parameter.name,
+            code=ParameterValidationErrorCode.BELOW_MINIMUM,
+            message=f"{parameter.name!r} must be >= {parameter.minimum!r}",
+        )
+    if parameter.maximum is not None and value > parameter.maximum:
+        return ParameterFieldErrorV1(
+            parameter_name=parameter.name,
+            code=ParameterValidationErrorCode.ABOVE_MAXIMUM,
+            message=f"{parameter.name!r} must be <= {parameter.maximum!r}",
+        )
+    return None
+
+
+def _validate_parameter_value(
+    parameter: StrategyParameterV1, value: object
+) -> ParameterFieldErrorV1 | None:
+    """Validate one submitted value against its declared parameter schema."""
+    if parameter.type == "boolean":
+        if not isinstance(value, bool):
+            return ParameterFieldErrorV1(
+                parameter_name=parameter.name,
+                code=ParameterValidationErrorCode.INVALID_TYPE,
+                message=f"{parameter.name!r} must be a bool",
+            )
+        return None
+    if parameter.type == "string":
+        if not isinstance(value, str):
+            return ParameterFieldErrorV1(
+                parameter_name=parameter.name,
+                code=ParameterValidationErrorCode.INVALID_TYPE,
+                message=f"{parameter.name!r} must be a string",
+            )
+        return None
+    if parameter.type == "integer":
+        # A ``bool`` is an ``int`` subclass in Python, so it is checked and
+        # rejected explicitly -- the same care ``validate_position_size``
+        # already takes for its own integer result.
+        if isinstance(value, bool) or not isinstance(value, int):
+            return ParameterFieldErrorV1(
+                parameter_name=parameter.name,
+                code=ParameterValidationErrorCode.INVALID_TYPE,
+                message=f"{parameter.name!r} must be a plain int",
+            )
+        return _numeric_value_error(parameter, value)
+    if parameter.type == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return ParameterFieldErrorV1(
+                parameter_name=parameter.name,
+                code=ParameterValidationErrorCode.INVALID_TYPE,
+                message=f"{parameter.name!r} must be an int or float",
+            )
+        return _numeric_value_error(parameter, value)
+    # "enum": exact type-and-value match -- True must never match 1.
+    enum_values = parameter.enum_values or ()
+    if not any(
+        type(value) is type(candidate) and value == candidate
+        for candidate in enum_values
+    ):
+        return ParameterFieldErrorV1(
+            parameter_name=parameter.name,
+            code=ParameterValidationErrorCode.NOT_IN_ENUM,
+            message=f"{parameter.name!r} must be one of {enum_values!r}",
+        )
+    return None
+
+
+def validate_strategy_parameters(
+    schema: Sequence[StrategyParameterV1],
+    submitted: Mapping[str, JsonValue],
+    *,
+    apply_defaults: bool,
+) -> Mapping[str, JsonValue] | tuple[ParameterFieldErrorV1, ...]:
+    """Validate ``submitted`` values against a Strategy's parameter schema.
+
+    The single authority every caller reuses verbatim -- Skill discovery
+    (validating a Strategy's own declared defaults), a future engine
+    launch, and a future UI never invent a second validator.
+
+    Pure and side-effect-free: for ordinary per-submission problems it
+    never raises, instead returning an ordered ``tuple[ParameterFieldErrorV1,
+    ...]`` (schema declaration order first, then any unknown submitted
+    fields in lexical order) -- matching this module's convention that a
+    pure ``validate_*`` function returns a structured result rather than
+    raising. When there are no errors, it returns the normalized parameter
+    mapping instead: every schema-declared field that was validly
+    submitted, plus (when ``apply_defaults`` is ``True``) every field the
+    caller omitted, filled in from its declared ``default``.
+
+    Rejects ``bool`` for an ``integer``/``number`` field (a ``bool`` must
+    never satisfy an ``int``/``float`` type check) and any field name not
+    declared in ``schema``.
+
+    Raises :class:`StrategyProtocolError` (code
+    ``duplicate_parameter_declaration``) only for a genuine schema-
+    authoring bug -- two schema entries sharing one ``name`` -- since that
+    is never a per-submission concern.
+    """
+    names = [parameter.name for parameter in schema]
+    if len(set(names)) != len(names):
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.DUPLICATE_PARAMETER_DECLARATION,
+            "parameter schema contains duplicate name declarations",
+        )
+
+    errors: list[ParameterFieldErrorV1] = []
+    normalized: dict[str, JsonValue] = {}
+
+    for parameter in schema:
+        if parameter.name in submitted:
+            value = submitted[parameter.name]
+            error = _validate_parameter_value(parameter, value)
+            if error is not None:
+                errors.append(error)
+            else:
+                normalized[parameter.name] = value
+        elif apply_defaults:
+            # The declared default's *shape* was already proven correct at
+            # ``StrategyParameterV1`` construction, but whether it falls
+            # within a declared minimum/maximum was deliberately deferred
+            # to here -- the one place that answers "is this value valid"
+            # for both a submitted value and a Strategy's own declared
+            # default. An out-of-range default surfaces as an ordinary
+            # field error here, which is exactly what lets Skill discovery
+            # isolate it as ``invalid_defaults`` instead of only failing
+            # much later at launch.
+            error = _validate_parameter_value(parameter, parameter.default)
+            if error is not None:
+                errors.append(error)
+            else:
+                normalized[parameter.name] = parameter.default
+        elif parameter.required:
+            errors.append(
+                ParameterFieldErrorV1(
+                    parameter_name=parameter.name,
+                    code=ParameterValidationErrorCode.MISSING_REQUIRED,
+                    message=f"{parameter.name!r} is required",
+                )
+            )
+
+    schema_names = set(names)
+    for name in sorted(name for name in submitted if name not in schema_names):
+        errors.append(
+            ParameterFieldErrorV1(
+                parameter_name=name,
+                code=ParameterValidationErrorCode.UNKNOWN_FIELD,
+                message=f"unknown parameter {name!r}",
+            )
+        )
+
+    if errors:
+        return tuple(errors)
+    return MappingProxyType(normalized)
+
+
 __all__ = [
     "JsonScalar",
     "JsonValue",
     "MarketViewV1",
+    "PARAMETER_TYPES",
+    "ParameterFieldErrorV1",
+    "ParameterType",
+    "ParameterValidationErrorCode",
     "PortfolioView",
     "PositionSummaryV1",
     "Signal",
     "SignalSide",
+    "StrategyParameterV1",
     "StrategyParameters",
     "StrategyProtocolError",
     "StrategyProtocolErrorCode",
@@ -367,4 +723,5 @@ __all__ = [
     "validate_entry_signals",
     "validate_exit_signals",
     "validate_position_size",
+    "validate_strategy_parameters",
 ]

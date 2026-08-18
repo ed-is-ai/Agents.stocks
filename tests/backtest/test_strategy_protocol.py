@@ -1,20 +1,29 @@
 """Story 2.1 coverage: every I/O-matrix row for the Strategy protocol
-boundary, plus determinism and no-persistence-leakage checks."""
+boundary, plus determinism and no-persistence-leakage checks.
+
+Also covers Story 2.2's :func:`validate_strategy_parameters` -- the single
+shared authority Skill discovery, a future engine launch, and a future UI
+all reuse verbatim.
+"""
 
 from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+import math
 
 import pytest
 from pydantic import ValidationError
 
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
+    ParameterFieldErrorV1,
+    ParameterValidationErrorCode,
     PortfolioView,
     PositionSummaryV1,
     Signal,
     SignalSide,
+    StrategyParameterV1,
     StrategyProtocolError,
     StrategyProtocolErrorCode,
     StrategyProtocolV1,
@@ -22,6 +31,7 @@ from app.services.backtest.strategy_protocol import (
     validate_entry_signals,
     validate_exit_signals,
     validate_position_size,
+    validate_strategy_parameters,
 )
 
 
@@ -404,3 +414,347 @@ def test_strategy_protocol_v1_runtime_checkable_conformance() -> None:
 def test_portfolio_view_satisfies_market_view_v1_structurally() -> None:
     view = _portfolio()
     assert isinstance(view, MarketViewV1)
+
+
+# ---------------------------------------------------------------------------
+# StrategyParameterV1 -- schema-authoring invariants (Story 2.2)
+# ---------------------------------------------------------------------------
+
+
+def _param(**overrides: object) -> StrategyParameterV1:
+    defaults: dict[str, object] = dict(
+        name="n",
+        type="integer",
+        default=1,
+        description="d",
+        required=True,
+    )
+    defaults.update(overrides)
+    return StrategyParameterV1(**defaults)  # type: ignore[arg-type]
+
+
+def test_strategy_parameter_is_frozen() -> None:
+    parameter = _param()
+    with pytest.raises(ValidationError):
+        parameter.default = 2  # type: ignore[misc]
+
+
+def test_strategy_parameter_rejects_unexpected_fields() -> None:
+    with pytest.raises(ValidationError):
+        _param(min_length=1)  # type: ignore[call-arg]
+
+
+def test_strategy_parameter_rejects_minimum_on_non_numeric_type() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="string", default="x", minimum=1)
+
+
+def test_strategy_parameter_rejects_maximum_on_non_numeric_type() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="boolean", default=True, maximum=1)
+
+
+def test_strategy_parameter_rejects_minimum_greater_than_maximum() -> None:
+    with pytest.raises(ValidationError):
+        _param(minimum=10, maximum=1)
+
+
+def test_strategy_parameter_allows_minimum_equal_maximum() -> None:
+    parameter = _param(minimum=5, maximum=5, default=5)
+    assert parameter.minimum == parameter.maximum == 5
+
+
+def test_strategy_parameter_rejects_bool_minimum() -> None:
+    with pytest.raises(ValidationError):
+        _param(minimum=True)
+
+
+def test_strategy_parameter_rejects_non_finite_minimum() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="number", default=1.0, minimum=math.nan)
+
+
+def test_strategy_parameter_rejects_enum_values_on_non_enum_type() -> None:
+    with pytest.raises(ValidationError):
+        _param(enum_values=("a", "b"))
+
+
+def test_strategy_parameter_requires_non_empty_enum_values() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="enum", default="a", enum_values=())
+
+
+def test_strategy_parameter_rejects_null_enum_value() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="enum", default="a", enum_values=("a", None))
+
+
+def test_strategy_parameter_rejects_heterogeneous_enum_values() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="enum", default=1, enum_values=(1, "a"))
+
+
+def test_strategy_parameter_rejects_bool_int_enum_leakage() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="enum", default=1, enum_values=(1, True))
+
+
+def test_strategy_parameter_rejects_duplicate_enum_values() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="enum", default="a", enum_values=("a", "a"))
+
+
+def test_strategy_parameter_rejects_default_not_in_enum_values() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="enum", default="c", enum_values=("a", "b"))
+
+
+def test_strategy_parameter_enum_default_must_type_match_not_just_equal() -> None:
+    # ``True`` must never be accepted as a default for an enum whose values
+    # are ints -- mirrors the same bool-vs-int care required everywhere else.
+    with pytest.raises(ValidationError):
+        _param(type="enum", default=True, enum_values=(0, 1))
+
+
+def test_strategy_parameter_rejects_bool_default_for_integer_type() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="integer", default=True)
+
+
+def test_strategy_parameter_rejects_bool_default_for_number_type() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="number", default=True)
+
+
+def test_strategy_parameter_rejects_int_default_for_string_type() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="string", default=1)
+
+
+def test_strategy_parameter_rejects_string_default_for_boolean_type() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="boolean", default="true")
+
+
+def test_strategy_parameter_number_type_accepts_int_default() -> None:
+    parameter = _param(type="number", default=5)
+    assert parameter.default == 5
+
+
+def test_strategy_parameter_rejects_non_finite_default() -> None:
+    with pytest.raises(ValidationError):
+        _param(type="number", default=math.inf)
+
+
+def test_strategy_parameter_allows_out_of_range_default() -> None:
+    # Deliberately NOT a construction-time error -- whether a default falls
+    # within minimum/maximum is validate_strategy_parameters's job (so Skill
+    # discovery can isolate it as `invalid_defaults` instead), not this
+    # model's.
+    parameter = _param(default=999, minimum=1, maximum=10)
+    assert parameter.default == 999
+
+
+# ---------------------------------------------------------------------------
+# validate_strategy_parameters -- the shared authority (Story 2.2)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_strategy_parameters_valid_submission_returns_mapping() -> None:
+    schema = [_param(name="n", type="integer", default=1, required=True)]
+    result = validate_strategy_parameters(schema, {"n": 5}, apply_defaults=False)
+    assert result == {"n": 5}
+
+
+def test_validate_strategy_parameters_missing_required_apply_defaults_false() -> None:
+    schema = [_param(name="n", type="integer", default=1, required=True)]
+    result = validate_strategy_parameters(schema, {}, apply_defaults=False)
+    assert result == (
+        ParameterFieldErrorV1(
+            parameter_name="n",
+            code=ParameterValidationErrorCode.MISSING_REQUIRED,
+            message="'n' is required",
+        ),
+    )
+
+
+def test_validate_strategy_parameters_missing_optional_apply_defaults_false() -> None:
+    schema = [_param(name="n", type="integer", default=1, required=False)]
+    result = validate_strategy_parameters(schema, {}, apply_defaults=False)
+    assert result == {}
+
+
+def test_validate_strategy_parameters_apply_defaults_true_fills_every_field() -> None:
+    schema = [
+        _param(name="required_field", type="integer", default=7, required=True),
+        _param(name="optional_field", type="string", default="x", required=False),
+    ]
+    result = validate_strategy_parameters(schema, {}, apply_defaults=True)
+    assert result == {"required_field": 7, "optional_field": "x"}
+
+
+def test_validate_strategy_parameters_apply_defaults_true_rejects_out_of_range() -> (
+    None
+):
+    schema = [_param(name="n", type="integer", default=999, minimum=1, maximum=10)]
+    result = validate_strategy_parameters(schema, {}, apply_defaults=True)
+    assert result == (
+        ParameterFieldErrorV1(
+            parameter_name="n",
+            code=ParameterValidationErrorCode.ABOVE_MAXIMUM,
+            message="'n' must be <= 10",
+        ),
+    )
+
+
+def test_validate_strategy_parameters_rejects_bool_for_integer_field() -> None:
+    schema = [_param(name="n", type="integer", default=1, required=False)]
+    result = validate_strategy_parameters(schema, {"n": True}, apply_defaults=False)
+    assert result == (
+        ParameterFieldErrorV1(
+            parameter_name="n",
+            code=ParameterValidationErrorCode.INVALID_TYPE,
+            message="'n' must be a plain int",
+        ),
+    )
+
+
+def test_validate_strategy_parameters_rejects_bool_for_number_field() -> None:
+    schema = [_param(name="n", type="number", default=1.0, required=False)]
+    result = validate_strategy_parameters(schema, {"n": False}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.INVALID_TYPE
+
+
+def test_validate_strategy_parameters_rejects_unknown_field() -> None:
+    schema = [_param(name="n", type="integer", default=1, required=False)]
+    result = validate_strategy_parameters(schema, {"unknown": 1}, apply_defaults=False)
+    assert result == (
+        ParameterFieldErrorV1(
+            parameter_name="unknown",
+            code=ParameterValidationErrorCode.UNKNOWN_FIELD,
+            message="unknown parameter 'unknown'",
+        ),
+    )
+
+
+def test_validate_strategy_parameters_below_minimum() -> None:
+    schema = [_param(name="n", type="integer", default=5, minimum=10)]
+    result = validate_strategy_parameters(schema, {"n": 1}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.BELOW_MINIMUM
+
+
+def test_validate_strategy_parameters_above_maximum() -> None:
+    schema = [_param(name="n", type="integer", default=5, maximum=10)]
+    result = validate_strategy_parameters(schema, {"n": 11}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.ABOVE_MAXIMUM
+
+
+def test_validate_strategy_parameters_within_bounds_is_accepted() -> None:
+    schema = [_param(name="n", type="integer", default=5, minimum=1, maximum=10)]
+    result = validate_strategy_parameters(schema, {"n": 10}, apply_defaults=False)
+    assert result == {"n": 10}
+
+
+def test_validate_strategy_parameters_enum_exact_type_match_true_rejects_one() -> None:
+    schema = [
+        _param(name="n", type="enum", default=0, enum_values=(0, 1), required=False)
+    ]
+    result = validate_strategy_parameters(schema, {"n": True}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.NOT_IN_ENUM
+
+
+def test_validate_strategy_parameters_enum_accepts_valid_member() -> None:
+    schema = [
+        _param(
+            name="n",
+            type="enum",
+            default="a",
+            enum_values=("a", "b"),
+            required=False,
+        )
+    ]
+    result = validate_strategy_parameters(schema, {"n": "b"}, apply_defaults=False)
+    assert result == {"n": "b"}
+
+
+def test_validate_strategy_parameters_rejects_nan() -> None:
+    schema = [_param(name="n", type="number", default=1.0, required=False)]
+    result = validate_strategy_parameters(schema, {"n": math.nan}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.NON_FINITE_VALUE
+
+
+def test_validate_strategy_parameters_rejects_infinity() -> None:
+    schema = [_param(name="n", type="number", default=1.0, required=False)]
+    result = validate_strategy_parameters(schema, {"n": math.inf}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.NON_FINITE_VALUE
+
+
+def test_validate_strategy_parameters_string_type_rejects_non_string() -> None:
+    schema = [_param(name="n", type="string", default="x", required=False)]
+    result = validate_strategy_parameters(schema, {"n": 1}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.INVALID_TYPE
+
+
+def test_validate_strategy_parameters_boolean_type_rejects_non_bool() -> None:
+    schema = [_param(name="n", type="boolean", default=True, required=False)]
+    result = validate_strategy_parameters(schema, {"n": 1}, apply_defaults=False)
+    assert isinstance(result, tuple)
+    assert result[0].code == ParameterValidationErrorCode.INVALID_TYPE
+
+
+def test_validate_strategy_parameters_error_order_is_schema_then_lexical_unknown() -> (
+    None
+):
+    schema = [
+        _param(name="second", type="integer", default=1, required=True),
+        _param(name="first", type="integer", default=1, required=True),
+    ]
+    result = validate_strategy_parameters(
+        schema, {"zeta": 1, "alpha": 1}, apply_defaults=False
+    )
+    assert isinstance(result, tuple)
+    parameter_names = [error.parameter_name for error in result]
+    # Schema declaration order first ("second" before "first" -- the order
+    # given, not alphabetical), then unknown submitted fields lexically.
+    assert parameter_names == ["second", "first", "alpha", "zeta"]
+
+
+def test_validate_strategy_parameters_is_deterministic_across_calls() -> None:
+    schema = [
+        _param(name="b", type="integer", default=1, required=True),
+        _param(name="a", type="integer", default=1, required=True),
+    ]
+    first = validate_strategy_parameters(schema, {"x": 1}, apply_defaults=False)
+    second = validate_strategy_parameters(schema, {"x": 1}, apply_defaults=False)
+    assert first == second
+
+
+def test_validate_strategy_parameters_rejects_duplicate_schema_declarations() -> None:
+    schema = [
+        _param(name="dup", type="integer", default=1, required=True),
+        _param(name="dup", type="integer", default=2, required=False),
+    ]
+    with pytest.raises(StrategyProtocolError) as excinfo:
+        validate_strategy_parameters(schema, {}, apply_defaults=False)
+    assert (
+        excinfo.value.code == StrategyProtocolErrorCode.DUPLICATE_PARAMETER_DECLARATION
+    )
+
+
+def test_validate_strategy_parameters_pure_no_mutation_of_inputs() -> None:
+    schema = [_param(name="n", type="integer", default=1, required=False)]
+    submitted = {"n": 5}
+    validate_strategy_parameters(schema, submitted, apply_defaults=False)
+    assert submitted == {"n": 5}
+
+
+def test_validate_strategy_parameters_empty_schema_empty_submission() -> None:
+    result = validate_strategy_parameters([], {}, apply_defaults=True)
+    assert result == {}

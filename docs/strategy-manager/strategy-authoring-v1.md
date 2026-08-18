@@ -5,12 +5,13 @@ layout a Strategy lives in, the interface it implements, how it constructs
 signals and reads bounded market/portfolio state, how its source identity is
 versioned, and how to run its contract tests.
 
-It covers **Story 2.1's** scope only: the typed protocol, the immutable
+It covers **Story 2.1's** scope -- the typed protocol, the immutable
 `Signal`/`PortfolioView` value objects, pure result validation, and the
-mechanically enforced safety boundary. It does not cover Skill discovery
-(Story 2.2), the concrete pandas-backed `MarketView` (Story 2.3), or engine
-invocation/mutation (Story 2.4) -- those extend this contract without
-changing it.
+mechanically enforced safety boundary -- and **Story 2.2's** scope: the
+`SKILL.md` frontmatter Skill discovery recognizes, the closed parameter
+schema, and the one shared parameter validator. It does not cover the
+concrete pandas-backed `MarketView` (Story 2.3) or engine invocation/
+mutation (Story 2.4) -- those extend this contract without changing it.
 
 ## Layout
 
@@ -32,7 +33,92 @@ this exact layout, used only by the repository's own test suite -- it is
 **not** discoverable as a live Skill and must never be treated as a real
 trading rule. Never repurpose an existing live-trading Skill (one that
 places orders or touches `TraderAgent`) as a Backtest Strategy; author a new
-one against this protocol instead.
+one against this protocol instead. It also predates this section's
+`kind`/`api_version` frontmatter convention on purpose, so it stays
+excluded from Skill discovery -- do not add those fields to it.
+
+## `SKILL.md` frontmatter (Story 2.2 discovery)
+
+`app.services.backtest.skill_discovery.discover_strategies` scans the
+immediate child folders of a `skills/`-shaped root for a `SKILL.md` whose
+frontmatter declares `kind: backtest-strategy`. Every other Skill in this
+repository -- anything with no `kind` field, or a `SKILL.md` missing
+entirely -- is silently ignored: discovery never assumes a folder without
+this declaration is a Strategy.
+
+A discoverable Strategy's frontmatter is plain YAML between a leading and
+trailing `---` line, parsed with a hardened safe loader (`yaml.safe_load`
+semantics -- no aliases, anchors, merge keys, duplicate keys, or a second
+frontmatter document):
+
+```yaml
+---
+kind: backtest-strategy
+name: breakout-pivot
+display_name: Breakout Pivot
+description: >
+  Buys a confirmed pivot breakout and exits on a trailing stop.
+api_version: 1
+parameters:
+  - name: pivot_lookback_sessions
+    type: integer
+    default: 20
+    description: Sessions of history used to detect the pivot.
+    required: false
+    minimum: 5
+    maximum: 252
+  - name: watch_security_id
+    type: string
+    default: sec-aapl
+    description: Security this Strategy trades.
+    required: true
+  - name: risk_profile
+    type: enum
+    default: moderate
+    description: Position-sizing aggressiveness.
+    required: false
+    enum_values: [conservative, moderate, aggressive]
+---
+```
+
+- **`kind`** -- must be exactly `backtest-strategy`. This is the one
+  signal that turns an ordinary Skill into a discoverable Strategy.
+- **`name`** -- lowercase kebab-case, and must equal the folder name
+  (`skills/breakout-pivot/` requires `name: breakout-pivot`). This is the
+  Strategy's stable ID.
+- **`api_version`** -- a plain integer, currently only `1`. A bool, float,
+  or string value (even `"1"`) is rejected -- the same bool/int care
+  `build_strategy_source_manifest` already takes.
+- **`description`** -- non-empty prose, same as every other Skill.
+- **`display_name`** (optional) -- non-empty prose shown to a user. When
+  omitted, discovery derives a deterministic Title Case fallback from
+  `name` (`breakout-pivot` -> `Breakout Pivot`).
+- **`parameters`** (optional, defaults to none) -- an ordered list of
+  parameter declarations, each mapping onto `StrategyParameterV1`:
+  - `name` -- non-empty, unique within the list.
+  - `type` -- one of `integer`, `number`, `boolean`, `string`, `enum`.
+  - `default` -- a value matching `type` (or, for `enum`, an exact
+    type-and-value member of `enum_values`). A default outside a declared
+    `minimum`/`maximum` is still accepted here -- discovery itself
+    isolates that Strategy with an `invalid_defaults` warning, rather
+    than failing SKILL.md parsing outright.
+  - `description` -- non-empty prose.
+  - `required` -- whether a caller must submit this parameter when
+    `validate_strategy_parameters` is called with `apply_defaults=False`.
+  - `minimum`/`maximum` (optional, `integer`/`number` only) -- inclusive
+    bounds; `minimum` must not exceed `maximum`.
+  - `enum_values` (optional, `enum` only) -- a non-empty, duplicate-free,
+    homogeneous tuple of scalars (a `bool` is never interchangeable with
+    an `int` here, so `[0, 1]` and `[false, true]` cannot mix).
+
+Discovery also requires `skills/<name>/scripts/strategy.py` to exist (the
+Strategy's runtime entrypoint used to build its source-identity manifest)
+but never imports or executes it -- discovery is metadata-only. A missing
+entrypoint, a malformed field, an unsupported `api_version`, an invalid
+parameter schema, an out-of-range declared default, unsafe frontmatter
+YAML, or two Strategies whose `name` or canonicalized `display_name`
+collide each isolate that one Strategy with a structured warning; one bad
+Strategy never aborts the scan.
 
 ## The protocol
 
@@ -163,9 +249,13 @@ is convenient; the validators below always produce one canonical order.
 
 `parameters: StrategyParameters` is a read-only, JSON-compatible mapping
 (`str | int | float | bool | None`, plus nested tuples/mappings of the
-same). Story 2.2 owns parameter schema discovery and the shared
-required/type/min/max/enum validator -- this story does not duplicate that;
-a Strategy simply reads whatever keys its `SKILL.md` documents.
+same). A Strategy simply reads whatever keys its `SKILL.md`'s
+`parameters:` block documents (see "`SKILL.md` frontmatter" above); the
+values it receives were already normalized by
+`app.services.backtest.strategy_protocol.validate_strategy_parameters` --
+the one shared required/type/min/max/enum authority Skill discovery, a
+future engine launch, and a future UI all reuse verbatim, so a Strategy
+never re-validates its own parameters.
 
 ## Validating results
 
