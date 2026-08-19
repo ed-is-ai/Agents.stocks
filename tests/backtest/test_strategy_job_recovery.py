@@ -152,6 +152,26 @@ def test_tombstone_projection_removes_actions_and_target(tmp_path):
     assert item.actions == ()
 
 
+def test_queued_initialization_projects_activity_deep_link(tmp_path):
+    """A non-tombstoned initialization job's projected notification must
+    also deep-link to the working Activity shell -- never the dead
+    ``?job_id=`` query-string format the projector used to emit before
+    this story (mirrors the backtest deep-link assertion below)."""
+    path = tmp_path / "backtest.db"
+    notifications_path = tmp_path / "notifications.db"
+    repo = _repo(path)
+    job = _enqueue(repo, "2026-05", "2026-05").job
+    assert job is not None
+    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications.ensure_schema()
+    projector = StrategyNotificationProjector(repo, notifications)
+
+    assert projector.project_pending() == 1
+    item = notifications.recent(include_dismissed=True)[0]
+
+    assert item.target_url == f"/strategy-manager/activities/{job.id}"
+
+
 def test_notification_projection_rejects_lower_version(tmp_path):
     from datetime import datetime, timezone
 

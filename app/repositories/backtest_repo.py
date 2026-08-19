@@ -826,9 +826,14 @@ BEGIN SELECT RAISE(ABORT, 'equity curve is immutable'); END;
 -- A caller-supplied key retrying the identical submission returns the
 -- same attempt; an enqueue with no key (NULL) never dedupes -- every
 -- distinct intentional submission with no key creates a distinct attempt.
+-- ``submission_digest`` pins the exact submission content a key was first
+-- committed with (Story 2.6 review), so a key replayed against a
+-- divergent submission is rejected rather than silently returning a
+-- stale attempt for the wrong content.
 CREATE TABLE IF NOT EXISTS backtest_enqueue_actions (
     idempotency_key TEXT PRIMARY KEY CHECK(length(idempotency_key) > 0),
     job_id TEXT NOT NULL UNIQUE REFERENCES strategy_jobs(id),
+    submission_digest TEXT NOT NULL CHECK(length(submission_digest) = 64),
     created_at TEXT NOT NULL
 );
 """
@@ -1406,6 +1411,17 @@ class BacktestRepository:
 
     # -- Story 2.6: Backtest atomic enqueue -------------------------------
 
+    @staticmethod
+    def _backtest_submission_content_digest(submission: BacktestSubmissionV1) -> str:
+        """Canonical content hash of one submission (minus its own
+        ``idempotency_key``), used to detect a replayed key whose
+        submission has actually diverged (Story 2.6 review) -- an
+        idempotency-key replay must return the exact already-committed
+        attempt, never silently paper over a different submission."""
+        payload = submission.model_dump(mode="python", exclude={"idempotency_key"})
+        payload["starting_capital"] = str(submission.starting_capital)
+        return manifest_digest(payload)
+
     def create_backtest_job(
         self, submission: BacktestSubmissionV1
     ) -> BacktestEnqueueResultV1:
@@ -1422,19 +1438,28 @@ class BacktestRepository:
         ``idempotency_key`` retrying the identical submission returns the
         already-committed attempt unchanged and creates nothing; omitting
         it, or supplying a distinct key, always creates a distinct
-        attempt, even for otherwise-identical parameters.
+        attempt, even for otherwise-identical parameters. A key replayed
+        against a submission whose content has diverged from the one it
+        was first committed with is rejected rather than silently
+        returning the stale attempt.
         """
         now = self._job_now()
+        content_digest = self._backtest_submission_content_digest(submission)
         try:
             with session(self._connect) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if submission.idempotency_key is not None:
                     existing = conn.execute(
-                        """SELECT job_id FROM backtest_enqueue_actions
+                        """SELECT job_id, submission_digest FROM backtest_enqueue_actions
                            WHERE idempotency_key=?""",
                         (submission.idempotency_key,),
                     ).fetchone()
                     if existing is not None:
+                        if str(existing[1]) != content_digest:
+                            raise StrategyJobConflict(
+                                "idempotency key was already used for a "
+                                "different backtest submission"
+                            )
                         existing_id = str(existing[0])
                         return BacktestEnqueueResultV1(
                             job=self._load_strategy_job(conn, existing_id),
@@ -1452,15 +1477,28 @@ class BacktestRepository:
                 ).fetchone()
                 if active is None or str(active[0]) != submission.profile_hash:
                     raise StrategyJobConflict("snapshot profile is not active")
-                if (
-                    submission.parent_job_id is not None
-                    and conn.execute(
-                        "SELECT 1 FROM strategy_jobs WHERE id=?",
-                        (submission.parent_job_id,),
-                    ).fetchone()
-                    is None
-                ):
-                    raise StrategyJobConflict("parent strategy job does not exist")
+                if submission.parent_job_id is not None:
+                    try:
+                        parent = self._load_strategy_job(conn, submission.parent_job_id)
+                    except StrategyJobNotFound:
+                        raise StrategyJobConflict(
+                            "parent strategy job does not exist"
+                        ) from None
+                    if parent.job_type is not StrategyJobType.BACKTEST:
+                        raise StrategyJobConflict(
+                            "parent strategy job must be a backtest job"
+                        )
+                    if parent.status not in {
+                        StrategyJobStatus.FAILED,
+                        StrategyJobStatus.CANCELLED,
+                    }:
+                        raise StrategyJobConflict(
+                            "parent strategy job must be terminal"
+                        )
+                    if parent.deleted_at is not None:
+                        raise StrategyJobConflict(
+                            "deleted strategy job cannot be a parent"
+                        )
                 readiness = self._interval_readiness_on_connection(
                     conn,
                     submission.profile_hash,
@@ -1469,6 +1507,14 @@ class BacktestRepository:
                 )
                 if not readiness.ready or readiness.ordered_month_digest is None:
                     raise StrategyJobConflict("snapshot coverage is not Ready")
+                if (
+                    manifest_digest(json.loads(submission.canonical_manifest_json))
+                    != submission.run_input_manifest_digest
+                ):
+                    raise StrategyJobConflict(
+                        "run input manifest digest does not match its "
+                        "canonical manifest"
+                    )
                 sequence_row = conn.execute(
                     "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
                 ).fetchone()
@@ -1530,9 +1576,9 @@ class BacktestRepository:
                 if submission.idempotency_key is not None:
                     conn.execute(
                         """INSERT INTO backtest_enqueue_actions
-                           (idempotency_key, job_id, created_at)
-                           VALUES (?, ?, ?)""",
-                        (submission.idempotency_key, job_id, now),
+                           (idempotency_key, job_id, submission_digest, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (submission.idempotency_key, job_id, content_digest, now),
                     )
                 job = self._load_strategy_job(conn, job_id)
                 backtest = self._load_strategy_run(conn, job_id)
@@ -2594,6 +2640,10 @@ class BacktestRepository:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
             source = self._load_strategy_job(conn, source_job_id)
+            if source.job_type is not StrategyJobType.BACKTEST:
+                raise StrategyJobConflict(
+                    "restart_backtest_job requires a backtest job"
+                )
             existing = conn.execute(
                 """SELECT child_job_id FROM strategy_job_restart_actions
                    WHERE source_job_id=? AND idempotency_key=?""",

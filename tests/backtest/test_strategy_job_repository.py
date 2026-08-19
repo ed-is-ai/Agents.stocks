@@ -175,7 +175,11 @@ def test_claim_is_fifo_single_running_and_token_owned(tmp_path: Path) -> None:
     assert repo.strategy_job(second.id).status is StrategyJobStatus.QUEUED
 
 
-BACKTEST_MANIFEST_DIGEST = "9" * 64
+#: Must equal ``manifest_digest(json.loads(canonical_manifest_json))`` for
+#: the fixed ``"{}"`` payload every ``_enqueue_backtest`` submission below
+#: uses -- ``create_backtest_job`` now verifies that equality itself
+#: (Story 2.6 review) rather than trusting a caller-supplied digest.
+BACKTEST_MANIFEST_DIGEST = manifest_digest(json.loads("{}"))
 BACKTEST_EXECUTION_CONTRACT_DIGEST = "8" * 64
 BACKTEST_STRATEGY_SOURCE_DIGEST = "7" * 64
 BACKTEST_ORDERED_MONTH_DIGEST = "6" * 64
@@ -693,6 +697,18 @@ def test_create_backtest_job_idempotency_key_returns_the_same_attempt(
     assert len(repo.list_strategy_jobs()) == 1
 
 
+def test_create_backtest_job_idempotency_key_rejects_a_divergent_resubmission(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+
+    _enqueue_backtest(repo, idempotency_key="submit-1", starting_capital="10000")
+
+    with pytest.raises(StrategyJobConflict, match="idempotency key"):
+        _enqueue_backtest(repo, idempotency_key="submit-1", starting_capital="20000")
+    assert len(repo.list_strategy_jobs()) == 1
+
+
 def test_create_backtest_job_without_a_key_always_creates_distinct_attempts(
     tmp_path: Path,
 ) -> None:
@@ -719,6 +735,32 @@ def test_create_backtest_job_reuses_an_existing_manifest_digest(
             "SELECT COUNT(*) FROM run_input_manifests WHERE digest=?",
             (BACKTEST_MANIFEST_DIGEST,),
         ).fetchone() == (1,)
+
+
+def test_create_backtest_job_rejects_a_manifest_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    _patch_ready(repo)
+
+    with pytest.raises(StrategyJobConflict, match="run input manifest digest"):
+        repo.create_backtest_job(
+            BacktestSubmissionV1(
+                strategy_id="momentum_v1",
+                strategy_api_version=1,
+                strategy_source_digest=BACKTEST_STRATEGY_SOURCE_DIGEST,
+                parameters={"lookback": 20},
+                profile_hash=PROFILE_HASH,
+                start_month="2026-05",
+                end_month="2026-05",
+                base_currency="USD",
+                starting_capital=Decimal("10000"),
+                run_input_manifest_digest="1" * 64,
+                execution_contract_digest=BACKTEST_EXECUTION_CONTRACT_DIGEST,
+                canonical_manifest_json="{}",
+            )
+        )
+    assert repo.list_strategy_jobs() == ()
 
 
 def test_create_backtest_job_rejects_an_inactive_profile(tmp_path: Path) -> None:
@@ -769,6 +811,33 @@ def test_create_backtest_job_rejects_when_coverage_is_not_ready(
             )
         )
     assert repo.list_strategy_jobs() == ()
+
+
+def test_create_backtest_job_rejects_a_non_terminal_parent(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    parent = _enqueue_backtest(repo).job
+
+    with pytest.raises(StrategyJobConflict, match="must be terminal"):
+        _enqueue_backtest(repo, parent_job_id=parent.id)
+
+
+def test_create_backtest_job_rejects_a_non_backtest_parent(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    initialization = _enqueue(repo, "2026-05", "2026-05").job
+    assert initialization is not None
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    failed = repo.fail_claimed_strategy_job(
+        claim.job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        failure_code=JobFailureCode.REQUIRED_DATA_MISSING,
+        failed_month="2026-05",
+        detail="Required historical data is unavailable",
+    )
+
+    with pytest.raises(StrategyJobConflict, match="must be a backtest job"):
+        _enqueue_backtest(repo, parent_job_id=failed.id)
 
 
 def test_backtest_claim_loads_matching_run_and_no_initialization_subtype(
@@ -975,6 +1044,27 @@ def test_restart_backtest_job_is_idempotent_and_replays_from_beginning(
         )
 
 
+def test_restart_backtest_job_rejects_a_non_backtest_source(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    initialization = _enqueue(repo, "2026-05", "2026-05").job
+    assert initialization is not None
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    failed = repo.fail_claimed_strategy_job(
+        claim.job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        failure_code=JobFailureCode.REQUIRED_DATA_MISSING,
+        failed_month="2026-05",
+        detail="Required historical data is unavailable",
+    )
+
+    with pytest.raises(StrategyJobConflict, match="requires a backtest job"):
+        repo.restart_backtest_job(
+            failed.id, expected_version=failed.status_version, idempotency_key="retry-1"
+        )
+
+
 def test_delete_backtest_job_tombstones_run_and_keeps_shared_manifest(
     tmp_path: Path,
 ) -> None:
@@ -1012,6 +1102,8 @@ def test_delete_backtest_job_tombstones_run_and_keeps_shared_manifest(
 def test_delete_backtest_job_rejects_running_and_completed_jobs(
     tmp_path: Path,
 ) -> None:
+    from app.services.backtest.backtest_engine import EquityCurvePointV1
+
     repo = _repo(tmp_path / "backtest.db")
     _enqueue_backtest(repo)
     claim = repo.claim_next_strategy_job()
@@ -1020,4 +1112,32 @@ def test_delete_backtest_job_rejects_running_and_completed_jobs(
     with pytest.raises(StrategyJobConflict, match="cannot be deleted"):
         repo.delete_strategy_job(
             claim.job.id, expected_version=claim.job.status_version
+        )
+
+    repo.write_backtest_staging(
+        claim.job.id,
+        claim_token=claim.claim_token,
+        expected_version=claim.job.status_version,
+        state_schema_version="backtest_portfolio_state.v1",
+        portfolio_state={"cash": "10000.00000000", "positions": []},
+        events=(),
+        equity_curve=(
+            EquityCurvePointV1(
+                session=date(2026, 5, 4),
+                cash_base=Decimal("10000"),
+                positions_value_base=Decimal("0"),
+                total_equity_base=Decimal("10000"),
+                sequence=1,
+            ),
+        ),
+        final_cash_base=Decimal("10000"),
+    )
+    completed = repo.complete_claimed_backtest_job(
+        claim.job.id, claim.claim_token, expected_version=claim.job.status_version
+    )
+    assert completed.status is StrategyJobStatus.COMPLETE
+
+    with pytest.raises(StrategyJobConflict, match="cannot be deleted"):
+        repo.delete_strategy_job(
+            completed.id, expected_version=completed.status_version
         )
