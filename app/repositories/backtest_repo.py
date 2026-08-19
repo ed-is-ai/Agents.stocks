@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
 import html
@@ -806,7 +806,8 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     cash_base TEXT NOT NULL,
     positions_value_base TEXT NOT NULL,
     total_equity_base TEXT NOT NULL,
-    PRIMARY KEY(run_id, date)
+    PRIMARY KEY(run_id, date),
+    UNIQUE(run_id, sequence)
 );
 
 CREATE TRIGGER IF NOT EXISTS equity_curve_immutable_update
@@ -871,8 +872,9 @@ class BacktestIntegrityError(RuntimeError):
         super().__init__(message)
 
 
-#: Unicode code-point cap on a Backtest Result note's raw (pre-escape)
-#: text (AC 5) -- checked before persistence, never truncated silently.
+#: Unicode code-point cap on a Backtest Result note's escaped, persisted
+#: text (AC 5) -- checked after ``html.escape`` (whose entity expansion can
+#: grow the text) and before persistence, never truncated silently.
 _NOTE_MAX_CODE_POINTS = 10_000
 
 
@@ -1653,10 +1655,22 @@ class BacktestRepository:
                 raise ValueError(
                     "staging equity curve must be strictly ordered by session"
                 )
+            sequences = [point.sequence for point in equity_curve]
+            if sequences != sorted(sequences) or len(set(sequences)) != len(sequences):
+                raise ValueError(
+                    "staging equity curve must be strictly ordered by sequence"
+                )
+        if not final_cash_base.is_finite():
+            raise ValueError("staging final_cash_base must be finite")
         now = self._job_now()
-        state_json = json.dumps(
-            dict(portfolio_state), sort_keys=True, separators=(",", ":")
-        )
+        try:
+            state_json = json.dumps(
+                dict(portfolio_state), sort_keys=True, separators=(",", ":")
+            )
+        except TypeError as exc:
+            raise ValueError(
+                "staging portfolio_state must be JSON-serializable"
+            ) from exc
         events_json = json.dumps(
             [event.model_dump(mode="json") for event in events],
             sort_keys=True,
@@ -1724,7 +1738,7 @@ class BacktestRepository:
         together.
         """
         from app.services.backtest.backtest_engine import ExitFillEventV1
-        from app.services.backtest.metrics import calculate_metrics
+        from app.services.backtest.metrics import MetricsError, calculate_metrics
 
         now = self._job_now()
         with session(self._connect) as conn:
@@ -1753,16 +1767,20 @@ class BacktestRepository:
             closed_trades = tuple(
                 event for event in staging.events if isinstance(event, ExitFillEventV1)
             )
-            metrics = calculate_metrics(
-                starting_capital=strategy_run.starting_capital,
-                equity_curve=staging.equity_curve,
-                closed_trades=closed_trades,
-            )
+            try:
+                metrics = calculate_metrics(
+                    starting_capital=strategy_run.starting_capital,
+                    equity_curve=staging.equity_curve,
+                    closed_trades=closed_trades,
+                )
+            except MetricsError as exc:
+                raise BacktestIntegrityError(str(exc)) from exc
             payload = self._canonical_result_payload(
                 metrics=metrics,
                 events=staging.events,
                 equity_curve=staging.equity_curve,
                 final_cash_base=staging.final_cash_base,
+                completed_at=now,
             )
             proposed_digest = manifest_digest(payload)
 
@@ -1806,9 +1824,9 @@ class BacktestRepository:
         ``note``/``note_version``/``updated_at``; every other Result field
         (digests, Metrics, Trade Log, Equity Curve) stays immutable,
         independently enforced by the ``backtest_result_evidence_
-        immutable`` trigger. ``note`` is escaped plain text capped at
-        10,000 Unicode code points; empty or whitespace-only input
-        normalizes to ``None``.
+        immutable`` trigger. ``note`` is escaped plain text; the escaped
+        result is capped at 10,000 Unicode code points; empty or
+        whitespace-only input normalizes to ``None``.
         """
         normalized = self._normalize_note(note)
         now = self._job_now()
@@ -1847,6 +1865,7 @@ class BacktestRepository:
         from app.services.backtest.backtest_engine import ExitFillEventV1
         from app.services.backtest.metrics import (
             BacktestMetricsV1,
+            MetricsError,
             metric_availability,
         )
 
@@ -1874,6 +1893,8 @@ class BacktestRepository:
         try:
             metrics = BacktestMetricsV1.model_validate(json.loads(str(row[0])))
             final_cash_base = Decimal(str(row[1]))
+            completed_at_raw = str(row[5])
+            completed_at = datetime.fromisoformat(completed_at_raw)
             events = tuple(
                 self._parse_trade_log_event(json.loads(str(item[0])))
                 for item in event_rows
@@ -1890,7 +1911,12 @@ class BacktestRepository:
                 )
                 for item in curve_rows
             )
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            InvalidOperation,
+        ) as exc:
             raise BacktestIntegrityError("stored backtest result is invalid") from exc
 
         payload = self._canonical_result_payload(
@@ -1898,6 +1924,7 @@ class BacktestRepository:
             events=events,
             equity_curve=equity_curve,
             final_cash_base=final_cash_base,
+            completed_at=completed_at_raw,
         )
         if manifest_digest(payload) != str(row[2]):
             raise BacktestIntegrityError("stored backtest result digest is invalid")
@@ -1905,9 +1932,12 @@ class BacktestRepository:
         closed_trades = tuple(
             event for event in events if isinstance(event, ExitFillEventV1)
         )
-        availability = metric_availability(
-            equity_curve=equity_curve, closed_trades=closed_trades
-        )
+        try:
+            availability = metric_availability(
+                equity_curve=equity_curve, closed_trades=closed_trades
+            )
+        except MetricsError as exc:
+            raise BacktestIntegrityError(str(exc)) from exc
 
         return BacktestResultV1(
             run_id=run_id,
@@ -1928,7 +1958,7 @@ class BacktestRepository:
             events=events,
             equity_curve=equity_curve,
             final_cash_base=final_cash_base,
-            completed_at=datetime.fromisoformat(str(row[5])),
+            completed_at=completed_at,
             note=None if row[3] is None else str(row[3]),
             note_version=int(row[4]),
         )
@@ -1940,11 +1970,12 @@ class BacktestRepository:
         stripped = note.strip()
         if not stripped:
             return None
-        if len(stripped) > _NOTE_MAX_CODE_POINTS:
+        escaped = html.escape(stripped, quote=True)
+        if len(escaped) > _NOTE_MAX_CODE_POINTS:
             raise ValueError(
                 f"note text exceeds {_NOTE_MAX_CODE_POINTS} Unicode code points"
             )
-        return html.escape(stripped, quote=True)
+        return escaped
 
     @staticmethod
     def _existing_result_digest(conn: sqlite3.Connection, run_id: str) -> str | None:
@@ -1972,7 +2003,12 @@ class BacktestRepository:
             if not isinstance(parameters, dict):
                 raise ValueError("stored strategy run parameters are not an object")
             starting_capital = Decimal(str(row[10]))
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            InvalidOperation,
+        ) as exc:
             raise BacktestIntegrityError("stored strategy run is invalid") from exc
         return _StrategyRunRow(
             id=str(row[0]),
@@ -2012,7 +2048,12 @@ class BacktestRepository:
                 self._parse_equity_curve_point(item) for item in json.loads(str(row[4]))
             )
             final_cash_base = Decimal(str(row[5]))
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            InvalidOperation,
+        ) as exc:
             raise BacktestIntegrityError("stored backtest staging is invalid") from exc
         return BacktestStagingV1(
             run_id=str(row[0]),
@@ -2094,18 +2135,24 @@ class BacktestRepository:
         events: tuple[TradeLogEvent, ...],
         equity_curve: tuple[EquityCurvePointV1, ...],
         final_cash_base: Decimal,
+        completed_at: str,
     ) -> dict[str, object]:
         """The one canonical shape both digest computation (on write) and
         tamper verification (on read) hash -- pre-stringifies every
         Decimal via pydantic's own ``mode="json"`` dump before this ever
         reaches ``canonical_manifest.jsonable`` (which has no native
-        ``Decimal`` case)."""
+        ``Decimal`` case). ``completed_at`` is the exact stored ISO string
+        (the same value passed to ``_insert_backtest_result`` on write, or
+        read back verbatim from the ``backtest_results`` row) so a
+        tampered ``completed_at`` fails the digest rebuild-and-compare
+        just like every other evidence field."""
         return {
             "schema_version": "backtest_result.v1",
             "metrics": metrics.model_dump(mode="json"),
             "events": [event.model_dump(mode="json") for event in events],
             "equity_curve": [point.model_dump(mode="json") for point in equity_curve],
             "final_cash_base": str(final_cash_base),
+            "completed_at": completed_at,
         }
 
     @staticmethod

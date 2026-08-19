@@ -125,9 +125,9 @@ def _total_return(
     try:
         with deterministic_decimal_context():
             ratio = (ending_equity - starting_capital) / starting_capital
-    except DecimalException as exc:
+        return float(ratio)
+    except (DecimalException, OverflowError) as exc:
         raise MetricsError("integrity_error", "total return arithmetic failed") from exc
-    return float(ratio)
 
 
 def _max_drawdown(equity_curve: tuple[EquityCurvePointV1, ...]) -> float:
@@ -139,9 +139,9 @@ def _max_drawdown(equity_curve: tuple[EquityCurvePointV1, ...]) -> float:
                 peak = max(peak, point.total_equity_base)
                 drawdown = point.total_equity_base / peak - 1
                 min_drawdown = min(min_drawdown, drawdown)
-    except DecimalException as exc:
+        return float(min_drawdown)
+    except (DecimalException, OverflowError) as exc:
         raise MetricsError("integrity_error", "max drawdown arithmetic failed") from exc
-    return float(min_drawdown)
 
 
 def _daily_returns(equity_curve: tuple[EquityCurvePointV1, ...]) -> list[Decimal]:
@@ -185,9 +185,9 @@ def _sharpe_ratio(daily_returns: list[Decimal]) -> float | None:
             mean_return = statistics.mean(daily_returns)
             annualization = Decimal(_TRADING_SESSIONS_PER_YEAR).sqrt()
             ratio = (mean_return / sample_stdev) * annualization
-    except (DecimalException, statistics.StatisticsError) as exc:
+        return float(ratio)
+    except (DecimalException, statistics.StatisticsError, OverflowError) as exc:
         raise MetricsError("integrity_error", "sharpe ratio arithmetic failed") from exc
-    return float(ratio)
 
 
 def _win_rate(closed_trades: tuple[ExitFillEventV1, ...]) -> float | None:
