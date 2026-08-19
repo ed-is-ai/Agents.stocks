@@ -159,10 +159,9 @@ def _map_simulation_failure_code(code: str) -> JobFailureCode:
 def _safe_detail(code: str, message: str) -> str:
     """Losslessly preserve the original engine error's own code/message
     (Design Notes) inside the 1-500 character ``failure_detail`` bound."""
-    detail = f"{code}: {message}".strip()
-    if not detail:
-        detail = code or "backtest simulation failed"
-    return detail[:500]
+    if not code and not message:
+        return "backtest simulation failed"
+    return f"{code}: {message}".strip()[:500]
 
 
 class BacktestResolutionError(Exception):
@@ -185,6 +184,16 @@ class _BacktestOwnershipLost(Exception):
     """Raised by the progress observer/sink when this attempt no longer
     owns its claim (stale token/version) -- the orchestrator re-reads and
     returns authoritative state rather than attempting any further write."""
+
+
+class _BacktestEngineDefect(Exception):
+    """Raised by the progress observer when the engine reports a month
+    outside the Strategy Run's own pinned ``start_month``/``end_month``
+    range -- the manifest's normalized range is pinned to match that
+    range exactly, so this is only reachable via a genuine engine defect,
+    never a legitimate CAS race. Caught by the orchestrator as a real,
+    diagnosable failure rather than silently stranding the job via
+    ``_BacktestOwnershipLost``."""
 
 
 @dataclass
@@ -288,6 +297,11 @@ class _ProgressObserver:
             raise _BacktestOwnershipLost("worker no longer owns this claim")
         if current.cancel_requested_at is not None:
             raise _BacktestCancelled("cancellation requested at a month boundary")
+        if not (self.backtest.start_month <= month <= self.backtest.end_month):
+            raise _BacktestEngineDefect(
+                f"engine reported month {month!r} outside pinned range "
+                f"{self.backtest.start_month}..{self.backtest.end_month}"
+            )
         try:
             updated = self.repository.set_strategy_job_current_month(
                 self.state.job_id,
@@ -399,7 +413,7 @@ class BacktestExecutionEngine:
         job = self._repository.strategy_job(job_id)
         if not self._owns(job, claim_token):
             return job
-        if job.job_type not in {StrategyJobType.BACKTEST, "backtest"}:
+        if job.job_type is not StrategyJobType.BACKTEST:
             return self._fail_or_cancel(
                 job,
                 claim_token,
@@ -480,6 +494,20 @@ class BacktestExecutionEngine:
             )
         except _BacktestCancelled:
             return self._cancel(job_id, claim_token)
+        except _BacktestEngineDefect as exc:
+            current = self._repository.strategy_job(job_id)
+            if not self._owns(current, claim_token):
+                return current
+            return self._fail_or_cancel(
+                current,
+                claim_token,
+                JobFailureCode.INTEGRITY_ERROR,
+                None,
+                _safe_detail(
+                    "engine_defect",
+                    f"engine reported a month outside the pinned range: {exc}",
+                ),
+            )
         except _BacktestOwnershipLost:
             return self._repository.strategy_job(job_id)
         except SimulationError as exc:
@@ -649,8 +677,7 @@ class BacktestExecutionEngine:
     @staticmethod
     def _owns(job: StrategyJobV1, claim_token: str) -> bool:
         return (
-            job.status in {StrategyJobStatus.RUNNING, "running"}
-            and job.claim_token == claim_token
+            job.status is StrategyJobStatus.RUNNING and job.claim_token == claim_token
         )
 
 

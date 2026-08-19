@@ -691,3 +691,68 @@ def test_worker_maps_strategy_identity_mismatch_to_integrity_error(
     assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
     assert result.failure_detail is not None
     assert "no longer matches" in result.failure_detail
+
+
+def test_safe_detail_falls_back_when_code_and_message_are_both_empty() -> None:
+    """``f"{code}: {message}".strip()`` always contains the literal ``":"``
+    even when both inputs are empty, so the fallback text is only ever
+    reachable when the emptiness check tests ``code``/``message``
+    directly rather than the already-joined string."""
+    assert worker_module._safe_detail("", "") == "backtest simulation failed"
+
+
+def test_build_backtest_engine_wires_a_real_historical_price_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every end-to-end test above immediately overwrites the private
+    ``engine._prices`` with a fake, so ``build_backtest_engine``'s real
+    wiring of ``HistoricalPriceRepository`` against
+    ``config.HISTORICAL_PRICE_CACHE`` is never otherwise exercised. This
+    test proves that wiring alone -- no simulation required."""
+    price_cache_path = tmp_path / "historical_price_cache.db"
+    monkeypatch.setattr(config, "HISTORICAL_PRICE_CACHE", price_cache_path)
+    repo = _repo(tmp_path / "backtest.db")
+    manifest = _manifest(revision="5" * 64, start_month="2026-06", end_month="2026-06")
+    enqueued = _enqueue(repo, manifest)
+
+    engine = worker_module.build_backtest_engine(
+        enqueued.job.id, "unused-claim-token", repo
+    )
+
+    assert isinstance(engine._prices, HistoricalPriceRepository)
+    with sqlite3.connect(price_cache_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "historical_price_revisions" in tables
+
+
+def test_progress_observer_raises_engine_defect_for_out_of_range_month(
+    tmp_path: Path,
+) -> None:
+    """``on_month_boundary`` must distinguish a genuine engine defect (the
+    engine reports a month outside the Strategy Run's own pinned range)
+    from a legitimate CAS ownership race -- and must never reach the
+    repository's own CAS write for the defect case."""
+    repo = _repo(tmp_path / "backtest.db")
+    manifest = _manifest(revision="5" * 64, start_month="2026-06", end_month="2026-06")
+    _enqueue(repo, manifest)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    assert claim.backtest is not None
+    state = worker_module._ClaimState(
+        job_id=claim.job.id,
+        claim_token=claim.claim_token,
+        status_version=claim.job.status_version,
+    )
+    observer = worker_module._ProgressObserver(
+        repository=repo, state=state, backtest=claim.backtest
+    )
+
+    with pytest.raises(worker_module._BacktestEngineDefect):
+        observer.on_month_boundary(month="2099-01")
+
+    assert repo.strategy_job(claim.job.id).current_month is None
