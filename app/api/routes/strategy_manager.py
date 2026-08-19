@@ -248,7 +248,7 @@ def _activity_template(job_type: StrategyJobType) -> str:
 
 
 @router.get("/strategy-manager/activities/{job_id}", response_class=HTMLResponse)
-async def initialization_activity(
+async def strategy_activity(
     request: Request, job_id: str, backtest: BacktestDep, jobs: JobsDep
 ) -> Response:
     try:
@@ -262,7 +262,7 @@ async def initialization_activity(
 
 
 @router.get("/strategy-manager/activities/{job_id}/status", response_class=HTMLResponse)
-async def initialization_activity_status(
+async def strategy_activity_status(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -286,7 +286,7 @@ async def initialization_activity_status(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def cancel_initialization(
+async def cancel_strategy_job(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -311,7 +311,7 @@ async def cancel_initialization(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def restart_initialization(
+async def restart_strategy_job(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
