@@ -37,7 +37,7 @@ class FakeRepository:
         self.claim = claim
         self.failed: list[tuple[str, str, dict[str, object]]] = []
         self.reconciled = ()
-        self.created: list[dict[str, object]] = []
+        self.created: list[object] = []
 
     def create_initialization_job(self, **configuration):
         self.created.append(configuration)
