@@ -166,6 +166,8 @@ class WeinsteinStrategy:
         scan_stage = getattr(getattr(scan, "stage", None), "value", None)
         if (
             minimum_volume is None
+            or prior_volume_mean <= 0
+            or volumes[-1] < 0
             or scan_stage != "Stage 2"
             or daily_stage != "Stage 2"
             or close <= prior_high
@@ -191,7 +193,7 @@ class WeinsteinStrategy:
         held = _position(portfolio, security_id)
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
-        if held is None or history is None or scan is None or len(history) < 150:
+        if held is None or held.quantity <= 0 or history is None or len(history) < 150:
             return []
         closes = _decimals(history["close"].iloc[-150:])
         maximum_loss = _decimal(parameters["maximum_loss_pct"])
@@ -201,7 +203,8 @@ class WeinsteinStrategy:
         sma150 = sum(closes, Decimal(0)) / Decimal(150)
         stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
         scan_stage = getattr(getattr(scan, "stage", None), "value", None)
-        if not (close <= stop or close < sma150 or scan_stage != "Stage 2"):
+        scan_failure = scan is not None and scan_stage != "Stage 2"
+        if not (close <= stop or close < sma150 or scan_failure):
             return []
         return [
             Signal(

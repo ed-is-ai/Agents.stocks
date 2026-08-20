@@ -151,6 +151,9 @@ def test_entry_fails_closed_for_missing_future_or_invalid_volume_evidence() -> N
         )
         == []
     )
+    zero_volume = _history(current_volume="0")
+    zero_volume.loc[:, "volume"] = Decimal("0")
+    assert strategy.entry_signals(_View(zero_volume, _scan()), PARAMETERS) == []
 
 
 def test_exit_and_position_sizing_use_full_integral_held_quantity() -> None:
@@ -175,3 +178,18 @@ def test_exit_and_position_sizing_use_full_integral_held_quantity() -> None:
         rule_id="test_buy",
     )
     assert strategy.position_size(buy, view, portfolio, PARAMETERS) == 10
+
+
+def test_price_risk_exit_does_not_require_scan_and_zero_quantity_does_not_sell() -> (
+    None
+):
+    strategy = MinerviniStrategy()
+    loss_view = _View(_history(current_close="91"), None)
+
+    assert len(strategy.exit_signals(loss_view, _portfolio(), PARAMETERS)) == 1
+    assert (
+        strategy.exit_signals(
+            _View(_history(), _scan(state="Damaged")), _portfolio("0"), PARAMETERS
+        )
+        == []
+    )

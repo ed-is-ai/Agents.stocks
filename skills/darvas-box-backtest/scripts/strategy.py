@@ -116,7 +116,9 @@ class DarvasBoxStrategy:
         box_depth_pct = (box_top - box_bottom) * Decimal(100) / box_top
         mean_volume = sum(valid_volumes, Decimal(0)) / Decimal(lookback)
         if (
-            box_depth_pct > maximum_depth
+            mean_volume <= 0
+            or current_volume < 0
+            or box_depth_pct > maximum_depth
             or current_close <= box_top
             or current_volume < mean_volume * volume_multiplier
         ):

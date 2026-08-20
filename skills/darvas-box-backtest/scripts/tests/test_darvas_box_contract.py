@@ -132,9 +132,12 @@ def test_price_equality_and_subthreshold_volume_do_not_enter() -> None:
     strategy = MODULE.DarvasBoxStrategy()
     as_of, equal_price = _history(current_close="100")
     _, low_volume = _history(current_volume="149.999")
+    _, zero_volume = _history(current_volume="0")
+    zero_volume.loc[:, "volume"] = Decimal("0")
 
     assert strategy.entry_signals(_View(as_of, equal_price), _parameters()) == []
     assert strategy.entry_signals(_View(as_of, low_volume), _parameters()) == []
+    assert strategy.entry_signals(_View(as_of, zero_volume), _parameters()) == []
 
 
 def test_exit_is_strictly_below_prior_box_bottom() -> None:

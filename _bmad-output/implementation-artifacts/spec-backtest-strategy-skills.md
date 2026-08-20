@@ -57,6 +57,17 @@ context:
 - [x] `tests/backtest/test_skill_discovery.py` and `tests/backtest/test_strategy_runtime_import_boundary.py` -- prove all six discover cleanly and cannot reach forbidden imports.
 - [x] `_bmad-output/implementation-artifacts/github-bmad-tracking.yaml` and GitHub issues -- keep each strategy's status externally visible.
 
+### Review Findings
+
+- [x] [Review][Patch] Keep Weinstein methodology self-contained and amend AD-2 for independently releasable skills [_bmad-output/planning-artifacts/architecture/architecture-Agents.stocks-2026-08-09/ARCHITECTURE-SPINE.md:101]
+- [x] [Review][Patch] Enforce a closed runtime import allowlist and reject relative or dynamic imports [tests/backtest/test_strategy_runtime_import_boundary.py:26]
+- [x] [Review][Patch] Allow Minervini and Weinstein price-risk exits when scan evidence is unavailable [skills/minervini-backtest/scripts/strategy.py:154]
+- [x] [Review][Patch] Reject SELL signals for zero-quantity positions [skills/minervini-backtest/scripts/strategy.py:160]
+- [x] [Review][Patch] Reject zero-volume reference baselines for volume-confirmed entries [skills/darvas-box-backtest/scripts/strategy.py:117]
+- [x] [Review][Patch] Validate only price evidence required by Buy and Hold [skills/buy-and-hold-backtest/scripts/strategy.py:35]
+- [x] [Review][Patch] Assert deterministic live discovery ordering [tests/backtest/test_skill_discovery.py:95]
+- [x] [Review][Patch] Load every live strategy through the production worker loader [tests/backtest/test_skill_discovery.py:95]
+
 **Acceptance Criteria:**
 - Given the repository `skills/` root, when discovery runs, then all six IDs appear in deterministic order with valid defaults and no warnings attributable to them.
 - Given identical bounded views and parameters, when any runtime is called repeatedly, then validated signals and sizing are identical.

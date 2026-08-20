@@ -100,6 +100,8 @@ class MinerviniStrategy:
         close = closes[-1]
         current_volume = volumes[-1]
         mean_volume = sum(volumes[-51:-1], Decimal(0)) / Decimal(50)
+        if mean_volume <= 0 or current_volume < 0:
+            return []
 
         vcp = getattr(scan, "vcp", None)
         stage = getattr(getattr(scan, "stage", None), "value", None)
@@ -160,7 +162,7 @@ class MinerviniStrategy:
         held = _position(portfolio, security_id)
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
-        if held is None or history is None or scan is None or len(history) < 50:
+        if held is None or held.quantity <= 0 or history is None or len(history) < 50:
             return []
         closes = _decimals(history["close"].iloc[-50:])
         maximum_loss = _decimal(parameters["maximum_loss_pct"])
@@ -171,12 +173,10 @@ class MinerviniStrategy:
         stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
         stage = getattr(getattr(scan, "stage", None), "value", None)
         state = getattr(getattr(scan, "vcp", None), "execution_state", None)
-        if not (
-            close <= stop
-            or close < sma50
-            or stage != "Stage 2"
-            or state in {"Invalid", "Damaged"}
-        ):
+        scan_failure = scan is not None and (
+            stage != "Stage 2" or state in {"Invalid", "Damaged"}
+        )
+        if not (close <= stop or close < sma50 or scan_failure):
             return []
         return [
             Signal(

@@ -95,9 +95,13 @@ def test_bearish_crossover_exits_only_a_held_target() -> None:
     unheld = validate_exit_signals(
         strategy.exit_signals(view, _portfolio(), PARAMETERS)
     )
+    zero_quantity = validate_exit_signals(
+        strategy.exit_signals(view, _portfolio("0"), PARAMETERS)
+    )
 
     assert [signal.side for signal in held] == [SignalSide.SELL]
     assert unheld == ()
+    assert zero_quantity == ()
 
 
 def test_requires_slow_window_plus_one_and_rejects_equal_or_inverted_windows() -> None:

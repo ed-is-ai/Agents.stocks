@@ -40,20 +40,12 @@ def _has_fresh_history(view: MarketViewV1, security_id: str) -> bool:
             return False
         latest_session = _as_date(history.index[-1])
         current = history.iloc[-1]
-        values = {
-            name: Decimal(str(current[name]))
-            for name in ("open", "high", "low", "close", "volume")
-        }
+        close = Decimal(str(current["close"]))
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return False
     except InvalidOperation:
         return False
-    return (
-        latest_session == view.as_of_session
-        and all(value.is_finite() for value in values.values())
-        and all(values[name] > 0 for name in ("open", "high", "low", "close"))
-        and values["volume"] >= 0
-    )
+    return latest_session == view.as_of_session and close.is_finite() and close > 0
 
 
 def _cutoff(parameters: StrategyParameters) -> date | None:

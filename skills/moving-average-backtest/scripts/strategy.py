@@ -126,7 +126,8 @@ class MovingAverageStrategy:
     ) -> list[Signal]:
         security_id = str(parameters.get("security_id", "sec-aapl"))
         if not any(
-            position.security_id == security_id for position in portfolio.positions
+            position.security_id == security_id and position.quantity > 0
+            for position in portfolio.positions
         ):
             return []
         if _crossover(view, parameters) != -1:

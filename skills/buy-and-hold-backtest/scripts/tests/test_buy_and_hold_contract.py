@@ -139,6 +139,14 @@ def test_missing_and_stale_target_history_fail_closed() -> None:
     assert strategy.entry_signals(_View(current_close="NaN"), PARAMETERS) == []
 
 
+def test_nullable_unused_volume_does_not_block_passive_entry() -> None:
+    strategy = BuyAndHoldStrategy()
+    view = _View()
+    view._history.loc[AS_OF, "volume"] = None
+
+    assert len(strategy.entry_signals(view, PARAMETERS)) == 1
+
+
 def test_strategy_never_exits() -> None:
     strategy = BuyAndHoldStrategy()
     assert (

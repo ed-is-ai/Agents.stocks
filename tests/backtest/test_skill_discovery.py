@@ -22,6 +22,8 @@ from app.services.backtest.skill_discovery import (
     StrategyDiscoveryWarningV1,
     discover_strategies,
 )
+from app.services.backtest.strategy_protocol import StrategyProtocolV1
+from app.services.backtest.worker import _load_strategy_instance
 
 FIXTURES_ROOT = (
     Path(__file__).resolve().parents[1]
@@ -98,11 +100,26 @@ def test_live_backtest_strategies_discover_with_runnable_defaults() -> None:
     warnings = _warnings_by_folder(result.warnings)
 
     assert set(EXPECTED_LIVE_STRATEGY_DEFAULTS) <= set(strategies)
+    assert tuple(
+        descriptor.strategy_id
+        for descriptor in result.strategies
+        if descriptor.strategy_id in EXPECTED_LIVE_STRATEGY_DEFAULTS
+    ) == tuple(EXPECTED_LIVE_STRATEGY_DEFAULTS)
     assert not set(EXPECTED_LIVE_STRATEGY_DEFAULTS) & set(warnings)
     assert {
         strategy_id: dict(strategies[strategy_id].default_parameters)
         for strategy_id in EXPECTED_LIVE_STRATEGY_DEFAULTS
     } == EXPECTED_LIVE_STRATEGY_DEFAULTS
+
+
+def test_live_backtest_strategies_load_through_production_worker() -> None:
+    result = discover_strategies(LIVE_SKILLS_ROOT)
+
+    for descriptor in result.strategies:
+        if descriptor.strategy_id not in EXPECTED_LIVE_STRATEGY_DEFAULTS:
+            continue
+        runtime_path = LIVE_SKILLS_ROOT / descriptor.runtime_path
+        assert isinstance(_load_strategy_instance(runtime_path), StrategyProtocolV1)
 
 
 def test_discover_strategies_full_root_scan() -> None:
