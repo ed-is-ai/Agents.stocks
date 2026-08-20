@@ -7,7 +7,9 @@ direct, aliased, ``from``, or transitive import of a forbidden dependency
 family: ``app.agents`` (covers ``TraderAgent`` and every live agent,
 including ``app.agents.analyst.analyst_agent``) and ``app.repositories``
 (covers live portfolio/trade/cash/position repositories and the
-``Connect``/DB-session factory in ``app.repositories.db``). This is a
+``Connect``/DB-session factory in ``app.repositories.db``). It also rejects
+process and network client modules that would bypass deterministic replay.
+This is a
 test-time guard, not a runtime sandbox: ``typing.Protocol``/Pyrefly give no
 such enforcement at call time, so the safety boundary documented in
 ``docs/strategy-manager/strategy-authoring-v1.md`` must be proven here
@@ -21,11 +23,26 @@ from pathlib import Path
 
 import pytest
 
+from app.services.backtest.skill_discovery import discover_strategies
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-#: Package roots a Strategy runtime module may never import, directly or
-#: transitively -- AD-10's forbidden dependency families.
-_FORBIDDEN_PREFIXES: tuple[str, ...] = ("app.agents", "app.repositories")
+#: Module roots a Strategy runtime may never import, directly or transitively:
+#: live-state families plus process/network escape paths forbidden by the
+#: Strategy authoring contract.
+_FORBIDDEN_PREFIXES: tuple[str, ...] = (
+    "app.agents",
+    "app.repositories",
+    "aiohttp",
+    "http",
+    "httpx",
+    "requests",
+    "socket",
+    "subprocess",
+    "urllib",
+    "urllib3",
+    "yfinance",
+)
 
 FIXTURE_STRATEGY_PATH = (
     PROJECT_ROOT
@@ -35,6 +52,11 @@ FIXTURE_STRATEGY_PATH = (
     / "minimal-strategy"
     / "scripts"
     / "strategy.py"
+)
+LIVE_SKILLS_ROOT = PROJECT_ROOT / "skills"
+LIVE_STRATEGY_PATHS = tuple(
+    LIVE_SKILLS_ROOT / descriptor.runtime_path
+    for descriptor in discover_strategies(LIVE_SKILLS_ROOT).strategies
 )
 
 
@@ -186,6 +208,17 @@ def test_forbidden_repository_import_is_rejected(tmp_path: Path) -> None:
         assert_no_forbidden_imports(module)
 
 
+@pytest.mark.parametrize("module_name", ("subprocess", "socket", "requests"))
+def test_process_and_network_imports_are_rejected(
+    tmp_path: Path, module_name: str
+) -> None:
+    module = tmp_path / "bad_strategy.py"
+    module.write_text(f"import {module_name}\n", encoding="utf-8")
+
+    with pytest.raises(ForbiddenImportError, match=module_name):
+        assert_no_forbidden_imports(module)
+
+
 def test_transitive_forbidden_import_is_rejected(tmp_path: Path) -> None:
     """A Strategy that only imports a real, non-``app.agents`` project
     module (``app.services.trader_service``) must still be rejected,
@@ -239,6 +272,14 @@ def test_stdlib_only_import_passes(tmp_path: Path) -> None:
 def test_fixture_strategy_imports_nothing_forbidden() -> None:
     assert FIXTURE_STRATEGY_PATH.is_file()
     assert_no_forbidden_imports(FIXTURE_STRATEGY_PATH)  # does not raise
+
+
+@pytest.mark.parametrize(
+    "strategy_path", LIVE_STRATEGY_PATHS, ids=lambda path: path.parts[-3]
+)
+def test_live_strategy_imports_nothing_forbidden(strategy_path: Path) -> None:
+    assert strategy_path.is_file()
+    assert_no_forbidden_imports(strategy_path)
 
 
 # ---------------------------------------------------------------------------

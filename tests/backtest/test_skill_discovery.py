@@ -29,6 +29,50 @@ FIXTURES_ROOT = (
     / "backtest-strategies"
     / "discovery"
 )
+LIVE_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
+
+EXPECTED_LIVE_STRATEGY_DEFAULTS = {
+    "buy-and-hold-backtest": {
+        "security_id": "sec-aapl",
+        "fixed_shares": 10,
+        "entry_on_or_after": "2000-01-01",
+    },
+    "darvas-box-backtest": {
+        "security_id": "sec-aapl",
+        "fixed_shares": 10,
+        "box_lookback_sessions": 20,
+        "maximum_box_depth_pct": 15.0,
+        "volume_multiplier": 1.5,
+    },
+    "minervini-backtest": {
+        "security_id": "sec-aapl",
+        "fixed_shares": 10,
+        "minimum_vcp_score": 70,
+        "minimum_trend_score": 85.0,
+        "minimum_relative_volume": 1.5,
+        "maximum_pivot_extension_pct": 3.0,
+        "maximum_loss_pct": 8.0,
+    },
+    "moving-average-backtest": {
+        "security_id": "sec-aapl",
+        "fixed_shares": 10,
+        "fast_window": 50,
+        "slow_window": 200,
+    },
+    "turtle-trend-backtest": {
+        "security_id": "sec-aapl",
+        "fixed_shares": 10,
+        "entry_lookback_sessions": 20,
+        "exit_lookback_sessions": 10,
+    },
+    "weinstein-backtest": {
+        "security_id": "sec-aapl",
+        "fixed_shares": 10,
+        "breakout_lookback_sessions": 50,
+        "minimum_relative_volume": 1.5,
+        "maximum_loss_pct": 10.0,
+    },
+}
 
 
 def _warnings_by_folder(
@@ -46,6 +90,19 @@ def _strategies_by_id(
 # ---------------------------------------------------------------------------
 # Full-root scan -- every I/O-matrix scenario in one pass
 # ---------------------------------------------------------------------------
+
+
+def test_live_backtest_strategies_discover_with_runnable_defaults() -> None:
+    result = discover_strategies(LIVE_SKILLS_ROOT)
+    strategies = _strategies_by_id(result.strategies)
+    warnings = _warnings_by_folder(result.warnings)
+
+    assert set(EXPECTED_LIVE_STRATEGY_DEFAULTS) <= set(strategies)
+    assert not set(EXPECTED_LIVE_STRATEGY_DEFAULTS) & set(warnings)
+    assert {
+        strategy_id: dict(strategies[strategy_id].default_parameters)
+        for strategy_id in EXPECTED_LIVE_STRATEGY_DEFAULTS
+    } == EXPECTED_LIVE_STRATEGY_DEFAULTS
 
 
 def test_discover_strategies_full_root_scan() -> None:
