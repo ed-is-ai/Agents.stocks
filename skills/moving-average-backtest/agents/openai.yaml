@@ -1,4 +1,0 @@
-interface:
-  display_name: "Moving Average Backtest"
-  short_description: "Backtest moving-average crossover signals"
-  default_prompt: "Use $moving-average-backtest to backtest a moving-average crossover strategy."

@@ -42,7 +42,7 @@ context:
 
 ## Code Map
 
-- `skills/{minervini,weinstein,darvas-box,buy-and-hold,turtle-trend,moving-average}-backtest/` -- six isolated Skill folders with metadata, runtime, UI metadata, and tests.
+- `skills/rtly-backtest-{minervini,weinstein,darvas-box,buy-and-hold,turtle-trend,moving-average}/` -- six isolated Skill folders with metadata, runtime, UI metadata, and tests.
 - `app/services/backtest/{strategy_protocol,skill_discovery,backtest_engine,worker}.py` -- stable contracts consumed but not changed.
 - `tests/backtest/test_skill_discovery.py` -- production-skill discovery/default integration coverage.
 - `tests/backtest/test_strategy_runtime_import_boundary.py` -- parameterized safety check for every production runtime.
@@ -51,9 +51,9 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `skills/minervini-backtest/` and `skills/weinstein-backtest/` -- scaffold with Skill Creator; implement scan-plus-daily-history rules, closed schemas, and contract tests.
-- [x] `skills/darvas-box-backtest/` and `skills/turtle-trend-backtest/` -- implement prior-window breakout/channel rules and boundary tests.
-- [x] `skills/moving-average-backtest/` and `skills/buy-and-hold-backtest/` -- implement crossover and passive benchmark rules, including documented V1 limitations.
+- [x] `skills/rtly-backtest-minervini/` and `skills/rtly-backtest-weinstein/` -- scaffold with Skill Creator; implement scan-plus-daily-history rules, closed schemas, and contract tests.
+- [x] `skills/rtly-backtest-darvas-box/` and `skills/rtly-backtest-turtle-trend/` -- implement prior-window breakout/channel rules and boundary tests.
+- [x] `skills/rtly-backtest-moving-average/` and `skills/rtly-backtest-buy-and-hold/` -- implement crossover and passive benchmark rules, including documented V1 limitations.
 - [x] `tests/backtest/test_skill_discovery.py` and `tests/backtest/test_strategy_runtime_import_boundary.py` -- prove all six discover cleanly and cannot reach forbidden imports.
 - [x] `_bmad-output/implementation-artifacts/github-bmad-tracking.yaml` and GitHub issues -- keep each strategy's status externally visible.
 
@@ -61,10 +61,10 @@ context:
 
 - [x] [Review][Patch] Keep Weinstein methodology self-contained and amend AD-2 for independently releasable skills [_bmad-output/planning-artifacts/architecture/architecture-Agents.stocks-2026-08-09/ARCHITECTURE-SPINE.md:101]
 - [x] [Review][Patch] Enforce a closed runtime import allowlist and reject relative or dynamic imports [tests/backtest/test_strategy_runtime_import_boundary.py:26]
-- [x] [Review][Patch] Allow Minervini and Weinstein price-risk exits when scan evidence is unavailable [skills/minervini-backtest/scripts/strategy.py:154]
-- [x] [Review][Patch] Reject SELL signals for zero-quantity positions [skills/minervini-backtest/scripts/strategy.py:160]
-- [x] [Review][Patch] Reject zero-volume reference baselines for volume-confirmed entries [skills/darvas-box-backtest/scripts/strategy.py:117]
-- [x] [Review][Patch] Validate only price evidence required by Buy and Hold [skills/buy-and-hold-backtest/scripts/strategy.py:35]
+- [x] [Review][Patch] Allow Minervini and Weinstein price-risk exits when scan evidence is unavailable [skills/rtly-backtest-minervini/scripts/strategy.py:154]
+- [x] [Review][Patch] Reject SELL signals for zero-quantity positions [skills/rtly-backtest-minervini/scripts/strategy.py:160]
+- [x] [Review][Patch] Reject zero-volume reference baselines for volume-confirmed entries [skills/rtly-backtest-darvas-box/scripts/strategy.py:117]
+- [x] [Review][Patch] Validate only price evidence required by Buy and Hold [skills/rtly-backtest-buy-and-hold/scripts/strategy.py:35]
 - [x] [Review][Patch] Assert deterministic live discovery ordering [tests/backtest/test_skill_discovery.py:95]
 - [x] [Review][Patch] Load every live strategy through the production worker loader [tests/backtest/test_skill_discovery.py:95]
 
@@ -87,7 +87,7 @@ Minervini entry additionally requires Stage 2, `valid_vcp`, `trend_template_pass
 ## Verification
 
 **Commands:**
-- `uv run pytest skills/*-backtest/scripts/tests -q` -- all strategy contracts pass without module-name collisions.
+- `uv run pytest skills/rtly-backtest-*/scripts/tests -q` -- all strategy contracts pass without module-name collisions.
 - `uv run pytest tests/backtest/test_skill_discovery.py tests/backtest/test_strategy_runtime_import_boundary.py -q` -- discovery and safety integration pass.
 - `uv run pytest -q` -- full suite passes.
 - `uv run ruff check . && uv run ruff format --check .` -- lint and formatting pass.
@@ -99,22 +99,22 @@ Minervini entry additionally requires Stage 2, `valid_vcp`, `trend_template_pass
 **Strategy rules**
 
 - Start with the richest scan-plus-daily breakout strategy and its fail-closed gates.
-  [`strategy.py:84`](../../skills/minervini-backtest/scripts/strategy.py#L84)
+  [`strategy.py:84`](../../skills/rtly-backtest-minervini/scripts/strategy.py#L84)
 
 - Review self-contained Stage 2 classification and breakout confirmation.
-  [`weinstein/strategy.py:132`](../../skills/weinstein-backtest/scripts/strategy.py#L132)
+  [`weinstein/strategy.py:132`](../../skills/rtly-backtest-weinstein/scripts/strategy.py#L132)
 
 - Inspect prior-box breakout and breakdown rules with strict price boundaries.
-  [`darvas/strategy.py:70`](../../skills/darvas-box-backtest/scripts/strategy.py#L70)
+  [`darvas/strategy.py:70`](../../skills/rtly-backtest-darvas-box/scripts/strategy.py#L70)
 
 - Inspect independent Turtle entry and exit channel windows.
-  [`turtle/strategy.py:87`](../../skills/turtle-trend-backtest/scripts/strategy.py#L87)
+  [`turtle/strategy.py:87`](../../skills/rtly-backtest-turtle-trend/scripts/strategy.py#L87)
 
 - Review true moving-average crossover detection and invalid-window handling.
-  [`moving-average/strategy.py:104`](../../skills/moving-average-backtest/scripts/strategy.py#L104)
+  [`moving-average/strategy.py:104`](../../skills/rtly-backtest-moving-average/scripts/strategy.py#L104)
 
 - Review the deterministic passive benchmark and finite-history validation.
-  [`buy-and-hold/strategy.py:69`](../../skills/buy-and-hold-backtest/scripts/strategy.py#L69)
+  [`buy-and-hold/strategy.py:69`](../../skills/rtly-backtest-buy-and-hold/scripts/strategy.py#L69)
 
 **Discovery and safety**
 

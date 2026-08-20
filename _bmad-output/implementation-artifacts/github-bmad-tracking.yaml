@@ -68,9 +68,9 @@ stories:
   3-3-review-two-results-side-by-side: { issue: 205, status: open }
 backtest_strategy_skills:
   branch: feat/backtest-strategy-skills
-  minervini-backtest: { issue: 251, status: done }
-  weinstein-backtest: { issue: 249, status: done }
-  darvas-box-backtest: { issue: 247, status: done }
-  buy-and-hold-backtest: { issue: 246, status: done }
-  turtle-trend-backtest: { issue: 250, status: done }
-  moving-average-backtest: { issue: 248, status: done }
+  rtly-backtest-minervini: { issue: 251, status: done }
+  rtly-backtest-weinstein: { issue: 249, status: done }
+  rtly-backtest-darvas-box: { issue: 247, status: done }
+  rtly-backtest-buy-and-hold: { issue: 246, status: done }
+  rtly-backtest-turtle-trend: { issue: 250, status: done }
+  rtly-backtest-moving-average: { issue: 248, status: done }
