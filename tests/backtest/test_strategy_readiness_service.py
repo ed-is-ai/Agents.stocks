@@ -179,11 +179,14 @@ def test_full_repo_qualification_ready(tmp_path: Path) -> None:
     assert result.qualification.state is PrerequisiteState.READY
 
 
-def test_full_repo_roster_ready(tmp_path: Path) -> None:
+def test_invalid_active_profile_roster_is_not_ready(tmp_path: Path) -> None:
     repo = _full_repo(tmp_path / "backtest.db")
     service = StrategyReadinessService(repo, clock=NOW)
     result = service.evaluate()
-    assert result.roster.state is PrerequisiteState.READY
+    # The seed deliberately stores an invalid canonical profile JSON. A
+    # globally present identity must not make that unusable active profile
+    # appear to have a usable roster.
+    assert result.roster.state is PrerequisiteState.MISSING
 
 
 def test_full_repo_active_profile_ready(tmp_path: Path) -> None:

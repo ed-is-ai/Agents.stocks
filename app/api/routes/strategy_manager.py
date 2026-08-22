@@ -318,6 +318,7 @@ async def universe_selector(
     request: Request,
     backtest: BacktestDep,
     q: str = "",
+    security_ids: list[str] | None = None,
 ) -> HTMLResponse:
     """Return universe selector partial with roster securities."""
     active = backtest.active_snapshot_profile()
@@ -330,6 +331,7 @@ async def universe_selector(
         {
             "securities": securities,
             "search_query": q,
+            "selected_security_ids": frozenset(security_ids or ()),
             "profile_hash": (active.profile_hash if active is not None else ""),
             "activation_seq": (active.activation_seq if active is not None else 0),
         },

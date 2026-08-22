@@ -134,8 +134,26 @@ class StrategyReadinessService:
         )
 
     def _evaluate_roster(self, now: datetime) -> PrerequisiteItemV1:
-        identities = self._repository.identity_rows()
-        if identities:
+        active = self._repository.active_snapshot_profile()
+        if active is None:
+            return PrerequisiteItemV1(
+                name="roster",
+                state=PrerequisiteState.MISSING,
+                reason="No active profile identifies a reconstruction roster",
+                last_verified_at=now,
+                recovery_action=RecoveryAction.SET_UP,
+            )
+        try:
+            profile = self._repository.snapshot_profile(active.profile_hash)
+            roster_json = (
+                None
+                if profile is None
+                else self._repository.roster_manifest_json(profile.roster_digest)
+            )
+        except Exception:
+            profile = None
+            roster_json = None
+        if profile is not None and roster_json is not None:
             return PrerequisiteItemV1(
                 name="roster",
                 state=PrerequisiteState.READY,
@@ -146,7 +164,7 @@ class StrategyReadinessService:
         return PrerequisiteItemV1(
             name="roster",
             state=PrerequisiteState.MISSING,
-            reason="No reconstruction roster has been captured",
+            reason="The active profile has no usable reconstruction roster",
             last_verified_at=now,
             recovery_action=RecoveryAction.SET_UP,
         )
