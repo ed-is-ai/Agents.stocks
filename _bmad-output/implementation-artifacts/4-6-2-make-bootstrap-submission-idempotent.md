@@ -1,6 +1,6 @@
 # Story 4.6.2: Make Bootstrap Submission Idempotent
 
-Status: review
+Status: done
 
 ## Story
 
@@ -36,6 +36,17 @@ so that refreshes, retries, and double-clicks cannot make setup confusing or dup
   - [x] Add repository tests for replay, mismatched key, concurrent same-key writers, transaction rollback, loaded job/subtype/outbox consistency, and persistence after reopen.
   - [x] Add setup-route tests for form key, repeat/double POST, refresh/retry redirect, unauthorised POST, and active-profile no-op.
   - [x] Run focused job repository/service/recovery/setup-route tests plus full Backtest tests, Ruff, Pyrefly, and `git diff --check`.
+
+### Review Findings
+
+- [x] [Review][Patch] Make exact replay, active-profile no-op, and new enqueue one repository-owned `BEGIN IMMEDIATE` decision so neither an exact retry nor a genuinely new request can race profile activation [app/repositories/backtest_repo.py:1753]
+- [x] [Review][Patch] Make `bootstrap_enqueue_actions` immutable and enforce its Bootstrap job/subtype invariant on every persisted state, not only insert [app/repositories/backtest_repo.py:960]
+- [x] [Review][Patch] Return a stable safe outcome when a retained Bootstrap key is replayed after its failed/cancelled activity was deleted, instead of raising an integrity error [app/repositories/backtest_repo.py:1868]
+- [x] [Review][Patch] Add the specified typed Bootstrap enqueue result contract and use it through repository and job-service boundaries [app/services/backtest/strategy_job.py:514]
+- [x] [Review][Patch] Add synchronized concurrent service-level coverage for same-key replay and profile-activation/no-op races; the current executor test does not guarantee overlap [tests/backtest/test_strategy_job_repository.py:419]
+- [x] [Review][Patch] Strengthen route/service acceptance tests for divergent preflight replay, authorized/unauthorized mutation boundaries, non-mutating GET/refresh, and real durable replay behavior [tests/backtest/test_strategy_setup_routes.py:143]
+- [x] [Review][Patch] Reconcile the story's verification counts and record the final reproducible commands/results after review fixes [4-6-2-make-bootstrap-submission-idempotent.md:70]
+- [x] [Review][Defer] Validate Bootstrap parent-job type, terminal/deleted state, and lineage semantics before accepting a supplied parent [app/repositories/backtest_repo.py:1798] — deferred, pre-existing
 
 ## Dev Notes
 
@@ -76,7 +87,10 @@ so that refreshes, retries, and double-clicks cannot make setup confusing or dup
 - Added `BootstrapSubmissionV1` and a versioned canonical digest that excludes the opaque form key.
 - Added `bootstrap_enqueue_actions`; its same-key lookup, Bootstrap job/subtype, binding, and notification outbox write share one `BEGIN IMMEDIATE` transaction.
 - Setup GET now renders an opaque hidden key and exact POST retries redirect to the original durable activity.
-- Focused suite: 124 passed; Backtest regression suite: 811 passed; touched-scope Ruff and Pyrefly clean.
+- Review fixes made Bootstrap enqueue a single atomic repository decision, added an explicit typed result, protected immutable replay bindings, and made deleted-activity replay fail safely.
+- Review-focused suite: `uv run pytest tests/backtest/test_strategy_job_repository.py tests/backtest/test_strategy_job_service.py tests/backtest/test_strategy_bootstrap_service.py tests/backtest/test_strategy_setup_routes.py tests/backtest/test_strategy_job_recovery.py tests/backtest/test_backtest_worker.py tests/backtest/test_strategy_readiness_service.py` — 185 passed.
+- Backtest regression suite: `uv run pytest tests/backtest` — 821 passed, 2 warnings.
+- Touched-scope `uv run ruff check ...` passed; application-scope `uv run pyrefly check ...` reported 0 errors.
 
 ### File List
 
@@ -90,8 +104,12 @@ so that refreshes, retries, and double-clicks cannot make setup confusing or dup
 - tests/backtest/test_strategy_job_service.py
 - tests/backtest/test_strategy_bootstrap_service.py
 - tests/backtest/test_strategy_setup_routes.py
+- tests/backtest/test_strategy_job_recovery.py
+- tests/backtest/test_backtest_worker.py
+- tests/backtest/test_strategy_readiness_service.py
 
 ## Change Log
 
 - 2026-08-22: Created implementation-ready Bootstrap idempotency context for GitHub #280.
 - 2026-08-22: Implemented durable Bootstrap submission replay and submitted for review.
+- 2026-08-22: Applied all code-review patches, completed regression verification, and marked the story done.

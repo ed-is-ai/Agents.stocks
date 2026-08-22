@@ -42,6 +42,7 @@ from app.services.backtest.strategy_job import (
     BacktestEnqueueResultV1,
     BacktestRunV1,
     BacktestSubmissionV1,
+    BootstrapEnqueueResultV1,
     BootstrapSubmissionV1,
     BootstrapRunV1,
     ClaimedStrategyJobV1,
@@ -978,6 +979,14 @@ WHEN NOT EXISTS (
     WHERE job.id = NEW.job_id AND job.job_type = 'bootstrap'
 )
 BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action requires bootstrap job'); END;
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_enqueue_action_immutable_update
+BEFORE UPDATE ON bootstrap_enqueue_actions
+BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_enqueue_action_immutable_delete
+BEFORE DELETE ON bootstrap_enqueue_actions
+BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action is immutable'); END;
 """
 
 
@@ -1752,25 +1761,13 @@ class BacktestRepository:
 
     def create_bootstrap_job(
         self,
-        submission: BootstrapSubmissionV1 | None = None,
-        *,
-        parent_job_id: str | None = None,
-    ) -> StrategyJobV1:
-        """Create or durably replay one Bootstrap activity.
+        submission: BootstrapSubmissionV1,
+    ) -> BootstrapEnqueueResultV1:
+        """Atomically no-op, create, or durably replay one Bootstrap activity.
 
-        Lookup/replay and the job, subtype, action binding, and notification
-        writes share one immediate SQLite transaction.
+        Replay lookup, active-profile no-op, competing-request policy, and the
+        job/subtype/action/outbox writes share one immediate transaction.
         """
-        # The supported UI/service path always supplies the typed submission.
-        # Retain the pre-4.6.2 direct repository surface for worker/lifecycle
-        # callers by generating the same kind of opaque one-shot key the GET
-        # route renders; it cannot deduplicate a caller that did not retain it.
-        if submission is None:
-            submission = BootstrapSubmissionV1(
-                idempotency_key=str(uuid4()), parent_job_id=parent_job_id
-            )
-        elif parent_job_id is not None:
-            raise ValueError("bootstrap parent_job_id belongs in the submission")
         now = self._job_now()
         content_digest = submission.canonical_content_digest()
         try:
@@ -1786,7 +1783,18 @@ class BacktestRepository:
                         raise StrategyJobConflict(
                             "idempotency key was already used for a different bootstrap submission"
                         )
-                    return self._load_bootstrap_submission_job(conn, str(existing[0]))
+                    job = self._load_bootstrap_submission_job(conn, str(existing[0]))
+                    return BootstrapEnqueueResultV1(
+                        no_op=False,
+                        job=job,
+                        bootstrap=self._load_bootstrap(conn, job.id),
+                    )
+                active = conn.execute(
+                    """SELECT 1 FROM active_snapshot_profile
+                       WHERE singleton_id=1 AND profile_hash IS NOT NULL"""
+                ).fetchone()
+                if active is not None:
+                    return BootstrapEnqueueResultV1(no_op=True)
                 competing = conn.execute(
                     """SELECT 1 FROM strategy_jobs
                        WHERE job_type='bootstrap' AND status IN ('queued', 'running')
@@ -1829,37 +1837,25 @@ class BacktestRepository:
                     (submission.idempotency_key, job_id, content_digest, now),
                 )
                 job = self._load_strategy_job(conn, job_id)
+                bootstrap = self._load_bootstrap(conn, job_id)
                 self._upsert_notification_outbox_on_connection(conn, job)
-            return job
+            return BootstrapEnqueueResultV1(
+                no_op=False, job=job, bootstrap=bootstrap
+            )
         except (StrategyJobConflict, StrategyJobNotFound):
             raise
         except sqlite3.IntegrityError as exc:
             raise StrategyJobConflict("bootstrap job creation conflicted") from exc
-
-    def bootstrap_submission_replay(
-        self, submission: BootstrapSubmissionV1
-    ) -> StrategyJobV1 | None:
-        """Return an exact durable Bootstrap replay without creating work."""
-        content_digest = submission.canonical_content_digest()
-        with session(self._connect) as conn:
-            existing = conn.execute(
-                """SELECT job_id, submission_digest
-                   FROM bootstrap_enqueue_actions WHERE idempotency_key=?""",
-                (submission.idempotency_key,),
-            ).fetchone()
-            if existing is None:
-                return None
-            if str(existing[1]) != content_digest:
-                raise StrategyJobConflict(
-                    "idempotency key was already used for a different bootstrap submission"
-                )
-            return self._load_bootstrap_submission_job(conn, str(existing[0]))
 
     def _load_bootstrap_submission_job(
         self, conn: sqlite3.Connection, job_id: str
     ) -> StrategyJobV1:
         try:
             job = self._load_strategy_job(conn, job_id)
+            if job.deleted_at is not None:
+                raise StrategyJobConflict(
+                    "the original bootstrap activity is no longer available"
+                )
             if job.job_type is not StrategyJobType.BOOTSTRAP:
                 raise BacktestIntegrityError(
                     "bootstrap submission references a non-bootstrap job"

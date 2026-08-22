@@ -119,13 +119,12 @@ class StrategyBootstrapService:
         """
         if self._jobs is None:
             raise RuntimeError("no job service configured")
-        replay = self._jobs.replay_bootstrap(submission)
-        if replay is not None:
-            return replay
-        already, _activated_at = self.is_already_set_up()
-        if already:
+        result = self._jobs.enqueue_bootstrap(submission)
+        if result.no_op:
             raise StrategyBootstrapAlreadySetUp("Strategy Manager is already set up")
-        return self._jobs.enqueue_bootstrap(submission)
+        if result.job is None:
+            raise RuntimeError("accepted Bootstrap submission did not return a job")
+        return result.job
 
     # ------------------------------------------------------------------
     # Stage methods -- called by the worker's StageWalkEngine

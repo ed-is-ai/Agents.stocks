@@ -23,6 +23,8 @@ from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
 from app.services.backtest.strategy_job import (
+    BootstrapEnqueueResultV1,
+    BootstrapRunV1,
     StrategyJobStatus,
     StrategyJobType,
 )
@@ -57,7 +59,13 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
 
         existing = self._bootstrap_by_key.get(submission.idempotency_key)
         if existing is not None:
-            return existing
+            return BootstrapEnqueueResultV1(
+                no_op=False,
+                job=existing,
+                bootstrap=BootstrapRunV1(job_id=existing.id),
+            )
+        if self._has_profile:
+            return BootstrapEnqueueResultV1(no_op=True)
         job = StrategyJobV1(
             id=str(uuid.uuid4()),
             job_type=StrategyJobType.BOOTSTRAP,
@@ -70,10 +78,11 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
         )
         self._bootstrap_jobs.append(job)
         self._bootstrap_by_key[submission.idempotency_key] = job
-        return job
-
-    def bootstrap_submission_replay(self, submission):
-        return self._bootstrap_by_key.get(submission.idempotency_key)
+        return BootstrapEnqueueResultV1(
+            no_op=False,
+            job=job,
+            bootstrap=BootstrapRunV1(job_id=job.id),
+        )
 
 
 @pytest.fixture
@@ -122,6 +131,7 @@ def setup_env_with_profile(monkeypatch):
 
 
 def test_setup_page_shows_setup_required(setup_env_no_profile) -> None:
+    repo, _jobs, _bootstrap = setup_env_no_profile
     response = client.get("/strategy-manager/setup")
     assert response.status_code == 200
     assert "Set up Strategy Manager" in response.text
@@ -130,6 +140,7 @@ def test_setup_page_shows_setup_required(setup_env_no_profile) -> None:
         response.text,
     )
     assert match is not None and 1 <= len(match.group(1)) <= 200
+    assert repo._bootstrap_jobs == []
 
 
 def test_setup_page_shows_already_set_up(setup_env_with_profile) -> None:
@@ -167,7 +178,7 @@ def test_setup_submit_replays_the_same_form_to_the_same_activity(
     key = re.search(r'name="idempotency_key" value="([^"]+)"', page.text)
     assert key is not None
     request = {
-        "headers": {"X-Auth-Token": "s3cret"},
+        "headers": {"X-Auth-Token": "s3cret", "HX-Request": "true"},
         "data": {"idempotency_key": key.group(1)},
         "follow_redirects": False,
     }
@@ -222,11 +233,14 @@ def test_setup_submit_already_set_up_returns_redirect(
 def test_setup_submit_unauthorized_rejected(
     setup_env_no_profile,
 ) -> None:
+    repo, _jobs, _bootstrap = setup_env_no_profile
     response = client.post(
         "/strategy-manager/setup",
+        data={"idempotency_key": "unauthorized-submit"},
         follow_redirects=False,
     )
     assert response.status_code in (401, 403)
+    assert repo._bootstrap_jobs == []
 
 
 @pytest.mark.parametrize("idempotency_key", [None, "", "x" * 201])
