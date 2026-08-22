@@ -511,6 +511,22 @@ class BacktestSubmissionV1(_LifecycleModel):
         return self
 
 
+class BootstrapSubmissionV1(_LifecycleModel):
+    """One caller-validated Bootstrap setup submission."""
+
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=200)]
+    parent_job_id: Annotated[str, Field(min_length=1)] | None = None
+
+    def canonical_content_digest(self) -> str:
+        """Return the versioned request identity, excluding the opaque key."""
+        return manifest_digest(
+            {
+                "schema": "bootstrap-submission-v1",
+                "parent_job_id": self.parent_job_id,
+            }
+        )
+
+
 class InitializationSubmissionV1(_LifecycleModel):
     profile_hash: Digest
     requested_start: Month

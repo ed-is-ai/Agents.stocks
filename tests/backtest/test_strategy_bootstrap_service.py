@@ -42,6 +42,7 @@ from app.services.backtest.strategy_bootstrap_service import (
 )
 from app.services.backtest.strategy_job import (
     BootstrapStage,
+    BootstrapSubmissionV1,
     JobFailureCode,
     PrerequisiteState,
     StrategyJobStatus,
@@ -312,16 +313,18 @@ def test_start_setup_raises_when_already_set_up(tmp_path: Path) -> None:
     jobs = StrategyJobService(repo)
     service = StrategyBootstrapService(repo, jobs=jobs)
     with pytest.raises(StrategyBootstrapAlreadySetUp):
-        service.start_setup()
+        service.start_setup(BootstrapSubmissionV1(idempotency_key="already-set-up"))
 
 
 def test_start_setup_enqueues_bootstrap_job(tmp_path: Path) -> None:
     repo = _empty_repo(tmp_path / "backtest.db")
     jobs = StrategyJobService(repo)
     service = StrategyBootstrapService(repo, jobs=jobs)
-    job = service.start_setup()
+    submission = BootstrapSubmissionV1(idempotency_key="start-setup")
+    job = service.start_setup(submission)
     assert job.job_type is StrategyJobType.BOOTSTRAP
     assert job.status is StrategyJobStatus.QUEUED
+    assert repo.create_bootstrap_job(submission) == job
 
 
 def test_clean_store_production_bundle_qualifies_captures_and_activates(

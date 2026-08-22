@@ -1,6 +1,6 @@
 # Story 4.6.2: Make Bootstrap Submission Idempotent
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -18,24 +18,24 @@ so that refreshes, retries, and double-clicks cannot make setup confusing or dup
 
 ## Tasks / Subtasks
 
-- [ ] Add a typed Bootstrap submission contract (AC: 1-3)
-  - [ ] Introduce `BootstrapSubmissionV1`/result models alongside existing lifecycle contracts with a bounded non-blank key and canonical submission digest.
-  - [ ] Pass the key from `_strategy_setup.html` through the route, `StrategyBootstrapService.start_setup()`, `StrategyJobService.enqueue_bootstrap()`, and repository API. Generate once per rendered form; preserve it on a correctable response.
+- [x] Add a typed Bootstrap submission contract (AC: 1-3)
+  - [x] Introduce `BootstrapSubmissionV1`/result models alongside existing lifecycle contracts with a bounded non-blank key and canonical submission digest.
+  - [x] Pass the key from `_strategy_setup.html` through the route, `StrategyBootstrapService.start_setup()`, `StrategyJobService.enqueue_bootstrap()`, and repository API. Generate once per rendered form; preserve it on a correctable response.
 
-- [ ] Persist and replay atomically (AC: 1-3)
-  - [ ] Add a purpose-specific Bootstrap idempotency table/constraint following `backtest_submission_idempotency` and restart-action patterns; it must reference exactly one Bootstrap job and canonical submission digest.
-  - [ ] In the repository transaction, read existing key before creating a job; identical replay returns the original loaded job, mismatched replay fails safely, and a race resolves from the durable winner.
-  - [ ] Keep `strategy_jobs`/`bootstrap_runs` creation and notification-outbox writing atomic; never use an in-memory lock or response cache as the authority.
+- [x] Persist and replay atomically (AC: 1-3)
+  - [x] Add a purpose-specific Bootstrap idempotency table/constraint following `backtest_submission_idempotency` and restart-action patterns; it must reference exactly one Bootstrap job and canonical submission digest.
+  - [x] In the repository transaction, read existing key before creating a job; identical replay returns the original loaded job, mismatched replay fails safely, and a race resolves from the durable winner.
+  - [x] Keep `strategy_jobs`/`bootstrap_runs` creation and notification-outbox writing atomic; never use an in-memory lock or response cache as the authority.
 
-- [ ] Preserve UX and lifecycle boundaries (AC: 4-5)
-  - [ ] Render a hidden key in the setup confirmation form; do not make it user-editable or display it in diagnostics/notifications.
-  - [ ] Ensure duplicate requests yield the durable Activity redirect/fragment rather than a 422 conflict template.
-  - [ ] Keep no-op for an already compatible active profile distinct from a replay of a previously submitted setup request.
+- [x] Preserve UX and lifecycle boundaries (AC: 4-5)
+  - [x] Render a hidden key in the setup confirmation form; do not make it user-editable or display it in diagnostics/notifications.
+  - [x] Ensure duplicate requests yield the durable Activity redirect/fragment rather than a 422 conflict template.
+  - [x] Keep no-op for an already compatible active profile distinct from a replay of a previously submitted setup request.
 
-- [ ] Verify races and regressions (AC: 1-5)
-  - [ ] Add repository tests for replay, mismatched key, concurrent same-key writers, transaction rollback, loaded job/subtype/outbox consistency, and persistence after reopen.
-  - [ ] Add setup-route tests for form key, repeat/double POST, refresh/retry redirect, unauthorised POST, and active-profile no-op.
-  - [ ] Run focused job repository/service/recovery/setup-route tests plus full Backtest tests, Ruff, Pyrefly, and `git diff --check`.
+- [x] Verify races and regressions (AC: 1-5)
+  - [x] Add repository tests for replay, mismatched key, concurrent same-key writers, transaction rollback, loaded job/subtype/outbox consistency, and persistence after reopen.
+  - [x] Add setup-route tests for form key, repeat/double POST, refresh/retry redirect, unauthorised POST, and active-profile no-op.
+  - [x] Run focused job repository/service/recovery/setup-route tests plus full Backtest tests, Ruff, Pyrefly, and `git diff --check`.
 
 ## Dev Notes
 
@@ -73,9 +73,25 @@ so that refreshes, retries, and double-clicks cannot make setup confusing or dup
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Added `BootstrapSubmissionV1` and a versioned canonical digest that excludes the opaque form key.
+- Added `bootstrap_enqueue_actions`; its same-key lookup, Bootstrap job/subtype, binding, and notification outbox write share one `BEGIN IMMEDIATE` transaction.
+- Setup GET now renders an opaque hidden key and exact POST retries redirect to the original durable activity.
+- Focused suite: 124 passed; Backtest regression suite: 811 passed; touched-scope Ruff and Pyrefly clean.
 
 ### File List
+
+- app/services/backtest/strategy_job.py
+- app/repositories/backtest_repo.py
+- app/services/backtest/strategy_job_service.py
+- app/services/backtest/strategy_bootstrap_service.py
+- app/api/routes/strategy_manager.py
+- app/api/templates/_strategy_setup.html
+- tests/backtest/test_strategy_job_repository.py
+- tests/backtest/test_strategy_job_service.py
+- tests/backtest/test_strategy_bootstrap_service.py
+- tests/backtest/test_strategy_setup_routes.py
 
 ## Change Log
 
 - 2026-08-22: Created implementation-ready Bootstrap idempotency context for GitHub #280.
+- 2026-08-22: Implemented durable Bootstrap submission replay and submitted for review.
