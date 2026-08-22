@@ -10,6 +10,7 @@ context:
   - '{project-root}/_bmad-output/planning-artifacts/epics.md'
 warnings: ['multiple-goals', 'oversized']
 baseline_revision: '1c5ff8909347432272db7be188323dda9346fe57'
+final_revision: 'b9f66dca5adb6358ef6f71d97aa302586b123b08'
 ---
 
 <intent-contract>
