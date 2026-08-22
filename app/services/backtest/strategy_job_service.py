@@ -135,6 +135,9 @@ class StrategyJobService:
     def enqueue_bootstrap(self, submission: BootstrapSubmissionV1):
         return self._repository.create_bootstrap_job(submission)
 
+    def replay_bootstrap(self, submission: BootstrapSubmissionV1):
+        return self._repository.bootstrap_submission_replay(submission)
+
     def enqueue_preparation(self, *, parent_job_id: str | None = None):
         return self._repository.create_preparation_job(parent_job_id=parent_job_id)
 

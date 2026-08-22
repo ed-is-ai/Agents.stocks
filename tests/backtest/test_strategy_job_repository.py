@@ -350,6 +350,43 @@ def test_create_bootstrap_job_replays_failed_and_cancelled_jobs(
     assert repo.create_bootstrap_job(cancelled_submission) == cancelled_terminal
 
 
+def test_create_bootstrap_job_replays_after_reopen_with_matching_subtype_and_outbox(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    submission = _bootstrap_submission("bootstrap-reopen")
+    job = _repo(path).create_bootstrap_job(submission)
+
+    replay = _repo(path).create_bootstrap_job(submission)
+
+    assert replay == job
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT job_id FROM bootstrap_runs WHERE job_id=?", (job.id,)
+        ).fetchone() == (job.id,)
+        assert conn.execute(
+            "SELECT job_id FROM notification_outbox WHERE job_id=?", (job.id,)
+        ).fetchone() == (job.id,)
+
+
+def test_bootstrap_submission_rejects_whitespace_key_and_database_binding(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="must not be blank"):
+        _bootstrap_submission("   ")
+
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    job = repo.create_bootstrap_job(_bootstrap_submission("bootstrap-check"))
+    with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO bootstrap_enqueue_actions
+               (idempotency_key, job_id, submission_digest, created_at)
+               VALUES ('   ', ?, ?, ?)""",
+            (job.id, "a" * 64, NOW.isoformat()),
+        )
+
+
 def test_create_bootstrap_job_rejects_divergent_reuse_without_writes(
     tmp_path: Path,
 ) -> None:

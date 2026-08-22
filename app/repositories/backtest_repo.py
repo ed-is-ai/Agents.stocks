@@ -961,11 +961,23 @@ CREATE TABLE IF NOT EXISTS backtest_enqueue_actions (
 -- Story 4.6.2: durable Bootstrap submission identity.  This binds a caller
 -- key to its canonical request without introducing another job lifecycle.
 CREATE TABLE IF NOT EXISTS bootstrap_enqueue_actions (
-    idempotency_key TEXT PRIMARY KEY CHECK(length(idempotency_key) > 0),
+    idempotency_key TEXT PRIMARY KEY CHECK(
+        length(idempotency_key) BETWEEN 1 AND 200
+        AND length(trim(idempotency_key)) > 0
+    ),
     job_id TEXT NOT NULL UNIQUE REFERENCES strategy_jobs(id),
     submission_digest TEXT NOT NULL CHECK(length(submission_digest) = 64),
     created_at TEXT NOT NULL
 );
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_enqueue_action_requires_bootstrap_job
+BEFORE INSERT ON bootstrap_enqueue_actions
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    JOIN bootstrap_runs run ON run.job_id = job.id
+    WHERE job.id = NEW.job_id AND job.job_type = 'bootstrap'
+)
+BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action requires bootstrap job'); END;
 """
 
 
@@ -1774,7 +1786,7 @@ class BacktestRepository:
                         raise StrategyJobConflict(
                             "idempotency key was already used for a different bootstrap submission"
                         )
-                    return self._load_strategy_job(conn, str(existing[0]))
+                    return self._load_bootstrap_submission_job(conn, str(existing[0]))
                 competing = conn.execute(
                     """SELECT 1 FROM strategy_jobs
                        WHERE job_type='bootstrap' AND status IN ('queued', 'running')
@@ -1823,6 +1835,41 @@ class BacktestRepository:
             raise
         except sqlite3.IntegrityError as exc:
             raise StrategyJobConflict("bootstrap job creation conflicted") from exc
+
+    def bootstrap_submission_replay(
+        self, submission: BootstrapSubmissionV1
+    ) -> StrategyJobV1 | None:
+        """Return an exact durable Bootstrap replay without creating work."""
+        content_digest = submission.canonical_content_digest()
+        with session(self._connect) as conn:
+            existing = conn.execute(
+                """SELECT job_id, submission_digest
+                   FROM bootstrap_enqueue_actions WHERE idempotency_key=?""",
+                (submission.idempotency_key,),
+            ).fetchone()
+            if existing is None:
+                return None
+            if str(existing[1]) != content_digest:
+                raise StrategyJobConflict(
+                    "idempotency key was already used for a different bootstrap submission"
+                )
+            return self._load_bootstrap_submission_job(conn, str(existing[0]))
+
+    def _load_bootstrap_submission_job(
+        self, conn: sqlite3.Connection, job_id: str
+    ) -> StrategyJobV1:
+        try:
+            job = self._load_strategy_job(conn, job_id)
+            if job.job_type is not StrategyJobType.BOOTSTRAP:
+                raise BacktestIntegrityError(
+                    "bootstrap submission references a non-bootstrap job"
+                )
+            self._load_bootstrap(conn, job_id)
+            return job
+        except StrategyJobNotFound as exc:
+            raise BacktestIntegrityError(
+                "stored bootstrap submission is unavailable"
+            ) from exc
 
     def create_preparation_job(
         self, *, parent_job_id: str | None = None

@@ -72,6 +72,9 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
         self._bootstrap_by_key[submission.idempotency_key] = job
         return job
 
+    def bootstrap_submission_replay(self, submission):
+        return self._bootstrap_by_key.get(submission.idempotency_key)
+
 
 @pytest.fixture
 def setup_env_no_profile(monkeypatch):
@@ -174,6 +177,28 @@ def test_setup_submit_replays_the_same_form_to_the_same_activity(
     assert first.status_code == second.status_code == 303
     assert first.headers["location"] == second.headers["location"]
     assert len(repo._bootstrap_jobs) == 1
+
+
+def test_setup_submit_preserves_key_on_correctable_conflict(
+    setup_env_no_profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _repo, _jobs, bootstrap = setup_env_no_profile
+
+    def conflict(_submission):
+        from app.services.backtest.strategy_job import StrategyJobConflict
+
+        raise StrategyJobConflict("competing setup")
+
+    monkeypatch.setattr(bootstrap, "start_setup", conflict)
+    response = client.post(
+        "/strategy-manager/setup",
+        headers={"X-Auth-Token": "s3cret"},
+        data={"idempotency_key": "retry-key"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 422
+    assert 'name="idempotency_key" value="retry-key"' in response.text
 
 
 def test_setup_submit_already_set_up_returns_redirect(

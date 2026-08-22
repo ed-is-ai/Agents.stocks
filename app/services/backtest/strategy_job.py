@@ -517,6 +517,13 @@ class BootstrapSubmissionV1(_LifecycleModel):
     idempotency_key: Annotated[str, Field(min_length=1, max_length=200)]
     parent_job_id: Annotated[str, Field(min_length=1)] | None = None
 
+    @field_validator("idempotency_key")
+    @classmethod
+    def _non_blank_key(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bootstrap idempotency_key must not be blank")
+        return value
+
     def canonical_content_digest(self) -> str:
         """Return the versioned request identity, excluding the opaque key."""
         return manifest_digest(

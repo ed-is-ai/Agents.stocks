@@ -288,7 +288,7 @@ async def submit_strategy_setup(
                 "setup_required": True,
                 "already_set_up": False,
                 "is_fixture": bootstrap.is_fixture,
-                "idempotency_key": str(uuid4()),
+                "idempotency_key": idempotency_key,
                 "error": "Unable to submit setup. Please try again.",
             },
             status_code=422,

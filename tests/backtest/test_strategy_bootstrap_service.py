@@ -327,6 +327,18 @@ def test_start_setup_enqueues_bootstrap_job(tmp_path: Path) -> None:
     assert repo.create_bootstrap_job(submission) == job
 
 
+def test_start_setup_replays_before_active_profile_no_op(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _empty_repo(path)
+    jobs = StrategyJobService(repo)
+    submission = BootstrapSubmissionV1(idempotency_key="completed-setup-retry")
+    original = jobs.enqueue_bootstrap(submission)
+    _seed(path)
+    service = StrategyBootstrapService(repo, jobs=jobs)
+
+    assert service.start_setup(submission) == original
+
+
 def test_clean_store_production_bundle_qualifies_captures_and_activates(
     tmp_path: Path,
 ) -> None:

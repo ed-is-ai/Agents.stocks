@@ -117,11 +117,14 @@ class StrategyBootstrapService:
         If a compatible active profile already exists, this is a no-op
         and raises :class:`StrategyBootstrapAlreadySetUp`.
         """
+        if self._jobs is None:
+            raise RuntimeError("no job service configured")
+        replay = self._jobs.replay_bootstrap(submission)
+        if replay is not None:
+            return replay
         already, _activated_at = self.is_already_set_up()
         if already:
             raise StrategyBootstrapAlreadySetUp("Strategy Manager is already set up")
-        if self._jobs is None:
-            raise RuntimeError("no job service configured")
         return self._jobs.enqueue_bootstrap(submission)
 
     # ------------------------------------------------------------------
