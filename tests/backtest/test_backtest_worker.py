@@ -787,7 +787,6 @@ def _stage_repo(path: Path) -> BacktestRepository:
         instant_clock=lambda: datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc),
     )
     repo.ensure_schema()
-    _seed_bootstrap_prerequisites(path)
     return repo
 
 
@@ -895,12 +894,19 @@ def _seed_bootstrap_prerequisites(path: Path) -> None:
 
 
 def test_bootstrap_worker_walks_its_stages_then_completes(tmp_path: Path) -> None:
+    from app.services.backtest.strategy_bootstrap_service import (
+        StrategyProviderBundleV1,
+    )
+
     repo = _stage_repo(tmp_path / "backtest.db")
     job = repo.create_bootstrap_job()
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     engine = worker_module.build_stage_walk_engine(
-        job.id, repo, StrategyJobType.BOOTSTRAP
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=StrategyProviderBundleV1.fixture(repo),
     )
 
     result = engine.run(job.id, claim.claim_token)
@@ -976,8 +982,10 @@ def test_stage_worker_writes_are_fenced_by_a_stale_lease_generation(
 
 
 def test_main_dispatches_a_bootstrap_job_to_the_stage_walk_engine(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("STRATEGY_FIXTURE", "1")
     repo = _stage_repo(tmp_path / "backtest.db")
     job = repo.create_bootstrap_job()
     claim = repo.claim_next_strategy_job()
