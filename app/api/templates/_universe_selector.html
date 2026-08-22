@@ -1,0 +1,71 @@
+{#- Accessible searchable multi-select universe selector (Story 4.5).
+    Deterministic symbol-and-market ordering, keyboard-operable, with
+    selected count and removable chips. -#}
+<div id="universe-selector" role="group" aria-labelledby="universe-selector-label">
+  <label id="universe-selector-label" class="form-label">Select securities</label>
+  <div class="input-group mb-2">
+    <span class="input-group-text"><i class="bi bi-search" aria-hidden="true"></i></span>
+    <input
+      type="text"
+      class="form-control"
+      id="universe-search"
+      placeholder="Search by symbol or market"
+      aria-describedby="universe-selector-label universe-count"
+      autocomplete="off"
+      hx-get="/strategy-manager/configuration/universe"
+      hx-trigger="keyup changed delay:300ms"
+      hx-target="#universe-selector"
+      hx-swap="outerHTML"
+      hx-include="input[name='security_ids']:checked"
+      name="q"
+      value="{{ search_query }}"
+    >
+  </div>
+
+  <div id="universe-count" class="form-text mb-2" role="status" aria-live="polite">
+    <span id="selected-count">0</span> selected
+  </div>
+
+  {% if not securities %}
+  <p class="text-muted">No securities are available in the roster. Ensure setup is complete.</p>
+  {% else %}
+  <div class="border rounded p-2" style="max-height: 300px; overflow-y: auto;" role="listbox" aria-multiselectable="true" aria-labelledby="universe-selector-label">
+    {% for security_id, provider_symbol, mic, currency in securities %}
+    {% set is_match = search_query | lower in (provider_symbol ~ ' ' ~ mic ~ ' ' ~ currency) | lower or not search_query %}
+    {% if is_match %}
+    <div class="form-check">
+      <input
+        class="form-check-input universe-checkbox"
+        type="checkbox"
+        name="security_ids"
+        id="sec_{{ security_id }}"
+        value="{{ security_id }}"
+        role="option"
+        aria-label="{{ provider_symbol }} on {{ mic }} ({{ currency }})"
+      >
+      <label class="form-check-label" for="sec_{{ security_id }}">
+        <strong>{{ provider_symbol }}</strong>
+        <span class="text-muted small">{{ mic }} · {{ currency }}</span>
+      </label>
+    </div>
+    {% endif %}
+    {% endfor %}
+    {% if securities | select('defined') | list | length == 0 %}
+    <p class="text-muted">No securities match "{{ search_query }}".</p>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  var checkboxes = document.querySelectorAll('.universe-checkbox');
+  var countEl = document.getElementById('selected-count');
+  function updateCount() {
+    var checked = document.querySelectorAll('.universe-checkbox:checked');
+    if (countEl) countEl.textContent = checked.length;
+  }
+  checkboxes.forEach(function(cb) { cb.addEventListener('change', updateCount); });
+  updateCount();
+})();
+</script>
