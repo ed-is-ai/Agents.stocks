@@ -2,8 +2,9 @@
 title: 'Add collapsed ticker detail and win/loss summary to Realised P&L'
 type: 'feature'
 created: '2026-08-24'
-status: 'in-review'
+status: 'done'
 baseline_revision: '79228e5dc45ac70afbaef2a0b299468bc9c4cbbc'
+final_revision: 'ac402b7781ec4eafb79ecf2ec73c7b47ff4318af'
 review_loop_iteration: 0
 followup_review_recommended: true
 context:
