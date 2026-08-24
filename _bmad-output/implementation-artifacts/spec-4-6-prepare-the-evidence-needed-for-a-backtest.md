@@ -70,6 +70,7 @@ final_revision: '7ea6a1a9'
 - [x] [Follow-up][Patch] Persist and render safe stage-specific Bootstrap failure details for controlled provider, roster, persistence, and activation errors while reducing unexpected exceptions to their type plus a server-log instruction [app/services/backtest/strategy_bootstrap_service.py; app/api/templates/_bootstrap_activity.html] — resolved and regression-tested
 - [x] [Follow-up][Patch] Render actionable readiness recoveries as links to their existing workflows; Coverage `Initialize` was a non-interactive badge despite the initialization route already existing [app/api/templates/_strategy_readiness.html] — resolved and regression-tested
 - [x] [Follow-up][Patch] Swap expected Strategy Manager `422` validation and `409` conflict responses into their form targets; initialization correctly returned linked errors for invalid months, but HTMX's default 4xx handling discarded the fragment and made submit appear inert [app/api/static/js/strategy-manager.js] — resolved and regression-tested
+- [x] [Follow-up][Patch] Make initialization validation independently robust to stale client assets by returning its error fragment as `200` for HTMX requests while retaining `422` for ordinary HTTP, and cache-version the Strategy Manager script URL [app/api/routes/strategy_manager.py; app/api/templates/index.html] — resolved and regression-tested
 
 ## Design Notes
 
@@ -92,6 +93,7 @@ The worker must not mark all stages complete before performing their work. Evide
 - 2026-08-24: Replaced generic Bootstrap evidence failures with safe stage-specific activity details, including provider HTTP status and actionable database-integrity categories without exposing arbitrary exception text.
 - 2026-08-24: Made readiness recovery actions navigable, including Coverage `Initialize` linking to the historical initialization form.
 - 2026-08-24: Enabled scoped HTMX swaps for expected Strategy Manager form validation/conflict responses so invalid initialization months show their server-rendered errors instead of appearing to do nothing.
+- 2026-08-24: Added server-side HTMX validation response handling and a Strategy Manager JavaScript cache version so initialization errors remain visible even when a browser cached the pre-fix script.
 
 ## Review Triage Log
 
