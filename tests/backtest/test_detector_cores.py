@@ -214,6 +214,22 @@ def test_well_formed_no_pattern_is_a_valid_false_vcp_result() -> None:
     assert vcp.vcp.valid_vcp is False
 
 
+def test_vcp_accepts_a_recent_no_volume_window_as_a_valid_non_breakout() -> None:
+    """A delisted/security-transition window may retain prices but no volume."""
+    rows = tuple(
+        replace(row, volume=Decimal(0)) if index >= 202 else row
+        for index, row in enumerate(_historical_rows())
+    )
+    technical = DETECTOR_REGISTRY[0].run(DetectorContext(rows))
+    assert isinstance(technical, TechnicalResultV1)
+
+    vcp = DETECTOR_REGISTRY[2].run(DetectorContext(rows, technical.technicals))
+
+    assert isinstance(vcp, VcpResultV1)
+    assert vcp.vcp.breakout_volume_detected is False
+    assert vcp.vcp.dry_up_ratio is None
+
+
 def test_vcp_adapter_rejects_coerced_or_missing_calculator_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -288,3 +304,14 @@ def test_volume_calculator_is_context_independent_and_preserves_live_integers() 
         [{"close": 100, "volume": Decimal("1000.125")} for _ in range(50)]
     )
     assert fractional["avg_volume_50d"] == Decimal("1000.125")
+
+
+def test_volume_calculator_no_volume_result_has_required_adapter_fields() -> None:
+    calculator = detector_module._calculator_module("volume_pattern_calculator")
+
+    result = calculator.calculate_volume_pattern(
+        [{"close": 100, "volume": 0} for _ in range(50)]
+    )
+
+    assert result["dry_up_ratio"] is None
+    assert result["breakout_volume_detected"] is False

@@ -15,6 +15,10 @@ from app.services.backtest.historical_initialization_engine import (
     InitializationMonthError,
     InitializationRepository,
 )
+from app.services.backtest.historical_data_qualification import (
+    FailureCode,
+    ProviderFailure,
+)
 from app.services.backtest.historical_price_evidence import HistoricalEvidenceRequest
 from app.services.backtest.reconstruction_roster import (
     CapturedRosterMemberV1,
@@ -312,6 +316,56 @@ def test_cached_evidence_is_reused_without_provider_access() -> None:
     )
 
     assert processor._evidence_for(roster_member, request) is cached
+
+
+def test_provider_failure_names_the_blocking_roster_symbol() -> None:
+    class Prices:
+        def find_request(self, **_kwargs):
+            return None
+
+        def find_compatible_request(self, **_kwargs):
+            return None
+
+    class Provider:
+        def fetch(self, _request):
+            raise ProviderFailure(
+                FailureCode.PROVIDER_CONTRACT_ERROR,
+                "Historical source contract mismatch",
+            )
+
+    processor = object.__new__(CanonicalSnapshotMonthProcessor)
+    setattr(processor, "_price_repository", Prices())
+    setattr(processor, "_evidence_adapter", Provider())
+    setattr(processor, "_alias_revision", "b" * 64)
+    setattr(
+        processor,
+        "_calendar",
+        SimpleNamespace(
+            sessions_in_range=lambda *_args: (date(2016, 7, 29),)
+        ),
+    )
+    member = CapturedRosterMemberV1(
+        security_id="security-1",
+        mic="XNAS",
+        calendar="XNYS",
+        provider_symbol="UHAL.B",
+        currency="USD",
+        quote_unit="USD",
+        source_memberships=(),
+        identity_evidence=(),
+        evidence_digest="a" * 64,
+    )
+
+    with pytest.raises(InitializationMonthError) as error:
+        processor._resolve_member(
+            member,
+            "2016-07",
+            date(2016, 7, 29),
+            datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+
+    assert error.value.code is JobFailureCode.PROVIDER_CONTRACT_ERROR
+    assert error.value.detail == "Historical source contract mismatch for UHAL.B"
 
 
 def test_calendar_contract_failure_keeps_calendar_failure_code() -> None:

@@ -132,7 +132,16 @@ class StrategyJobService:
     def enqueue_backtest(self, submission: BacktestSubmissionV1):
         return self._repository.create_backtest_job(submission)
 
-    def enqueue_bootstrap(self, submission: BootstrapSubmissionV1):
+    def enqueue_bootstrap(
+        self,
+        submission: BootstrapSubmissionV1,
+        *,
+        allow_active_refresh: bool = False,
+    ):
+        if allow_active_refresh:
+            return self._repository.create_bootstrap_job(
+                submission, allow_active_refresh=True
+            )
         return self._repository.create_bootstrap_job(submission)
 
     def enqueue_preparation(self, submission=None, *, parent_job_id: str | None = None):
