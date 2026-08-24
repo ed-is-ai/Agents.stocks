@@ -438,7 +438,7 @@ def test_datahub_csv_headers_are_normalized_for_strict_roster_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Response:
-        text = "Symbol,Name,Sector\nAAPL,Apple Inc.,Technology\n"
+        text = "Symbol,Security,GICS Sector\nAAPL,Apple Inc.,Technology\n"
 
         def raise_for_status(self) -> None:
             return None

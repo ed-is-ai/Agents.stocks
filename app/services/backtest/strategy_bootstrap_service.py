@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 import requests
 
+from app.core.ticker_identity import load_provider_symbol_aliases
 from app.repositories.backtest_repo import BacktestIntegrityError
 from app.services.backtest.strategy_job import (
     BootstrapSubmissionV1,
@@ -38,13 +39,16 @@ from app.services.backtest.historical_data_qualification import (
 )
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
 from app.services.backtest.reconstruction_roster import (
+    DATAHUB_SP500_SOURCE_URL,
     DataHubRosterSourceAdapter,
     MarketIdentityEvidence,
     ReconstructionRosterCaptureService,
+    ReconstructionRosterPolicyV1,
+    RosterCaptureError,
     RosterSource,
     RosterSourcePayloadV1,
     TradingViewRosterSourceAdapter,
-    YFinanceMarketIdentityResolver,
+    TradingViewBatchMarketIdentityResolver,
 )
 from app.services.backtest.security_identity import SecurityAliasManifestV1
 from app.services.backtest.snapshot_profile import ProfileDetectorV1, SnapshotProfileV1
@@ -282,6 +286,7 @@ class StrategyProviderBundleV1:
         calendar = TradingCalendar()
         fixture_path = _qualification_fixture_path()
         probes = _production_probes()
+        provider_symbol_aliases = load_provider_symbol_aliases()
         runner = QualificationRunner(repository, fixture_path, probes, calendar=calendar)
         roster = ReconstructionRosterCaptureService(
             repository,
@@ -290,8 +295,13 @@ class StrategyProviderBundleV1:
                 TradingViewRosterSourceAdapter("US"),
                 TradingViewRosterSourceAdapter("UK"),
             ),
-            YFinanceMarketIdentityResolver(),
-            policy=None,
+            TradingViewBatchMarketIdentityResolver(
+                provider_symbol_aliases=provider_symbol_aliases
+            ),
+            policy=ReconstructionRosterPolicyV1(
+                calendar=calendar,
+                provider_symbol_aliases=provider_symbol_aliases,
+            ),
         )
         aliases = SecurityAliasManifestV1.build((), created_at=now)
 
@@ -405,13 +415,15 @@ def _production_probes() -> dict[str, ProbeDefinition]:
 
 
 def _fetch_datahub_sp500() -> list[dict[str, object]] | None:
-    response = requests.get("https://datahub.io/core/s-and-p-500-companies-financials/r/constituents-financials.csv", timeout=15)
+    response = requests.get(DATAHUB_SP500_SOURCE_URL, timeout=15)
     response.raise_for_status()
     return [
         {
             "symbol": row.get("Symbol", row.get("symbol", "")),
-            "name": row.get("Name", row.get("name", "")),
-            "sector": row.get("Sector", row.get("sector", "")),
+            "name": row.get("Security", row.get("Name", row.get("name", ""))),
+            "sector": row.get(
+                "GICS Sector", row.get("Sector", row.get("sector", ""))
+            ),
         }
         for row in csv.DictReader(StringIO(response.text))
     ]
@@ -424,7 +436,12 @@ def _bootstrap_failure(exc: Exception, fallback: JobFailureCode) -> BootstrapSta
         )
     code = getattr(exc, "code", fallback)
     job_code = _job_failure_code(code, fallback)
-    return BootstrapStageFailure(job_code, "Bootstrap evidence stage failed")
+    detail = (
+        str(exc)
+        if isinstance(exc, RosterCaptureError)
+        else "Bootstrap evidence stage failed"
+    )
+    return BootstrapStageFailure(job_code, detail)
 
 
 def _job_failure_code(code: object, fallback: JobFailureCode) -> JobFailureCode:
