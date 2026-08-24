@@ -2,7 +2,7 @@
 title: 'Add collapsed ticker detail and win/loss summary to Realised P&L'
 type: 'feature'
 created: '2026-08-24'
-status: 'done'
+status: 'in-progress'
 baseline_revision: '79228e5dc45ac70afbaef2a0b299468bc9c4cbbc'
 final_revision: 'ac402b7781ec4eafb79ecf2ec73c7b47ff4318af'
 review_loop_iteration: 0
@@ -63,6 +63,17 @@ warnings: []
 - Given a ticker detail disclosure is opened, when its content is inspected, then all existing columns and FX-unavailable flags for that group remain visible.
 - Given a multi-ticker summary, when it renders, then ticker-group and row order equal the service-returned order and the Account total still renders from `summary.total_realised_pnl_gbp`.
 - Given no round-trips, when the fragment renders, then the existing empty state and zero-valued win/loss balance render without an error.
+
+### Review Findings
+
+- [ ] [Review][Patch] Include the ticker in each disclosure summary for a distinguishable accessible control [app/api/templates/_realised_pnl.html:101]
+- [ ] [Review][Patch] Make each visible ticker subtotal a row header [app/api/templates/_realised_pnl.html:80]
+- [ ] [Review][Patch] Correct the summary-strip comment now that it includes non-GBP counts [app/api/templates/_realised_pnl.html:24]
+- [ ] [Review][Patch] Make the closed-disclosure assertion reject every boolean `open` attribute form [tests/test_realised_pnl_route.py:132]
+- [ ] [Review][Patch] Assert the FX-only subtotal explicitly reports unavailable FX [tests/test_realised_pnl_route.py:136]
+- [ ] [Review][Patch] Assert each nested table retains its ticker-specific accessible label [tests/test_realised_pnl_route.py:135]
+- [ ] [Review][Patch] Assert visible positive and negative ticker subtotal amounts [tests/test_realised_pnl_route.py:137]
+- [x] [Review][Defer] Normalise rounded negative-zero P&L before rendering [app/services/realised_pnl_service.py:152] — deferred, pre-existing
 
 ## Spec Change Log
 
