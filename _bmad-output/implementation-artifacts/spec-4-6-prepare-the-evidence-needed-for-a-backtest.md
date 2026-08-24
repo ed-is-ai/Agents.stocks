@@ -59,6 +59,12 @@ final_revision: '7ea6a1a9'
 - Given cancellation before manifest sealing, when a safe boundary is reached, then preparation is Cancelled and creates no Backtest.
 - Given cancellation during manifest sealing, when the cancellation endpoint is called, then it is unavailable and the seal transaction wins or fails atomically.
 
+### Review Findings
+
+- [x] [Review][Patch] Honour a cancellation that wins the stage-transition version race; the Preparation worker currently returns a still-running claimed job when `set_strategy_job_current_stage()` conflicts, so the dispatcher can classify the worker exit as interrupted rather than terminally cancelling it [app/services/backtest/worker.py:294] — fixed and regression-tested
+- [x] [Review][Patch] Move actual conditional FX acquisition/pinning into `fx_pinning`; `_resolve_roster_evidence()` currently resolves FX while `evidence_selection` is displayed, leaving the user-visible FX stage as a no-op and violating the stage contract [app/services/backtest/worker.py:305] — fixed and regression-tested
+- [x] [Review][Defer] Provide a supported Bootstrap qualification-failure recovery and retain a safe failure reason; the reported “Historical data qualification is not available” screen offers only deletion, while `_run_qualification()` discards the recorded provider reason [app/services/backtest/strategy_bootstrap_service.py:152] — deferred, pre-existing
+
 ## Design Notes
 
 The worker must not mark all stages complete before performing their work. Evidence resolution may be logically split across the two evidence stages even when existing resolver calls remain shared; the durable stage value is the user-visible lifecycle boundary, while the repository remains the authority for final identity and atomicity.

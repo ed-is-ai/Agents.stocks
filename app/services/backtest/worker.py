@@ -273,6 +273,14 @@ class PreparationStageEngine(StageWalkEngine):
                 desc.universe.parameter,
             ) != (s.universe_schema, s.universe_mode, s.universe_parameter):
                 raise ValueError
+            resolver = BacktestLaunchService(
+                backtest_repo=self._repository,
+                historical_price_repo=self._prices,
+                fx_quote_repo=self._fx,
+                jobs=StrategyJobService(self._repository),
+                skills_root=self._skills_root,
+                project_root=self._project_root,
+            )
             evidence: tuple[PinnedSecurityEvidenceV1, ...] | None = None
             for stage in STAGE_SEQUENCES[StrategyJobType.PREPARATION]:
                 job = self._repository.strategy_job(job_id)
@@ -292,29 +300,30 @@ class PreparationStageEngine(StageWalkEngine):
                         lease=self._lease,
                     )
                 except StrategyJobConflict:
-                    return self._repository.strategy_job(job_id)
+                    current = self._repository.strategy_job(job_id)
+                    if _owns(current, claim_token) and current.cancel_requested_at:
+                        return self._cancel(job_id, claim_token)
+                    return current
                 if stage == "evidence_selection":
-                    resolver = BacktestLaunchService(
-                        backtest_repo=self._repository,
-                        historical_price_repo=self._prices,
-                        fx_quote_repo=self._fx,
-                        jobs=StrategyJobService(self._repository),
-                        skills_root=self._skills_root,
-                        project_root=self._project_root,
-                    )
                     evidence = resolver._resolve_roster_evidence(
                         profile_hash=prep.selection.profile_hash,
                         snapshot_month=str(prep.start_month),
                         base_currency=prep.base_currency,
                         selected_security_ids=prep.selection.canonical_security_ids,
+                        pin_fx=False,
                     )
                 elif stage == "fx_pinning":
-                    # The existing resolver pins FX alongside each selected
-                    # security. Keep this durable stage as the explicit
-                    # boundary for cancellation and presentation; the
-                    # following seal reuses the already verified revisions.
+                    # Price/action revisions are already pinned; add only
+                    # the conditional FX revisions at the matching visible
+                    # stage so progress accurately reflects the work.
                     if evidence is None:
                         raise ValueError("selected evidence was not resolved")
+                    evidence = resolver._resolve_roster_evidence(
+                        profile_hash=s.profile_hash,
+                        snapshot_month=str(prep.start_month),
+                        base_currency=prep.base_currency,
+                        selected_security_ids=s.canonical_security_ids,
+                    )
                 else:
                     # Once this stage is persisted, cancellation requests are
                     # rejected by the repository and the atomic seal owns the
