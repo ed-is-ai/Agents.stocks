@@ -174,8 +174,9 @@
 ## Deferred from: code review of spec-4-6-prepare-the-evidence-needed-for-a-backtest.md (2026-08-24)
 
 - source_spec: `spec-4-6-prepare-the-evidence-needed-for-a-backtest.md`
-  summary: Bootstrap qualification failure does not provide a supported retry/recovery path or expose the safe recorded provider reason.
-  evidence: The observed failed Bootstrap Activity shows only “Historical data qualification is not available” and a delete action; `StrategyBootstrapService._run_qualification()` drops `latest.failure_reason` when creating the failure detail.
+  status: resolved-2026-08-24
+  summary: Bootstrap qualification failure now provides a direct fresh setup submission and exposes the safe recorded provider reason.
+  evidence: `StrategyBootstrapService._run_qualification()` retains `latest.failure_reason`; the failed Bootstrap Activity renders “Try setup again” with a new idempotency key.
 # Deferred from: code review of spec-gh-288-289-strategy-manager-activity-and-migration (2026-08-24)
 
 - source_spec: `spec-gh-288-289-strategy-manager-activity-and-migration.md`
