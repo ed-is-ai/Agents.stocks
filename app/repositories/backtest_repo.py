@@ -1357,31 +1357,43 @@ def _migrate_bats_mic_constraints(conn: sqlite3.Connection) -> None:
     """Expand legacy closed-MIC CHECK constraints without losing evidence."""
     legacy_constraint = "('XNAS', 'XNYS', 'XLON')"
     expanded_constraint = "('BATS', 'XNAS', 'XNYS', 'XLON')"
-    pending: list[tuple[str, str]] = []
-    for table in (
+    tables = (
         "snapshot_members",
         "security_alias_entries",
         "security_identities",
-    ):
+    )
+    pending: list[tuple[str, str]] = []
+    stale_replacements: list[str] = []
+    for table in tables:
+        replacement = f"{table}__bats_migration"
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (replacement,),
+        ).fetchone() is not None:
+            stale_replacements.append(replacement)
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone()
         if row is not None and legacy_constraint in str(row[0]):
             pending.append((table, str(row[0])))
-    if not pending:
+    if not pending and not stale_replacements:
         return
 
     conn.commit()
     conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN IMMEDIATE")
     try:
+        for replacement in stale_replacements:
+            conn.execute(f'DROP TABLE "{replacement}"')
         for table, table_sql in pending:
             replacement = f"{table}__bats_migration"
             triggers = tuple(
-                str(row[0])
+                (str(row[0]), str(row[1]))
                 for row in conn.execute(
-                    """SELECT sql FROM sqlite_master
-                       WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL""",
-                    (table,),
+                    """SELECT name, sql FROM sqlite_master
+                       WHERE type='trigger' AND sql IS NOT NULL
+                         AND (tbl_name=? OR instr(sql, ?) > 0)""",
+                    (table, table),
                 ).fetchall()
             )
             columns = tuple(
@@ -1407,9 +1419,11 @@ def _migrate_bats_mic_constraints(conn: sqlite3.Connection) -> None:
                 f'INSERT INTO "{replacement}" ({rendered_columns}) '
                 f'SELECT {rendered_columns} FROM "{table}"'
             )
+            for trigger_name, _trigger_sql in triggers:
+                conn.execute(f'DROP TRIGGER "{trigger_name}"')
             conn.execute(f'DROP TABLE "{table}"')
             conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
-            for trigger_sql in triggers:
+            for _trigger_name, trigger_sql in triggers:
                 conn.execute(trigger_sql)
         conn.commit()
     except Exception:

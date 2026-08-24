@@ -123,6 +123,16 @@ def test_ensure_schema_expands_legacy_mic_constraints(tmp_path) -> None:
             INSERT INTO security_identities VALUES
                 ('security', 'XNAS', 'AAPL', 'digest', 'revision',
                  '2026-08-10T12:00:00+00:00');
+            CREATE TABLE identity_audit (security_id TEXT NOT NULL);
+            CREATE TRIGGER identity_audit_requires_security
+            BEFORE INSERT ON identity_audit
+            WHEN NOT EXISTS (
+                SELECT 1 FROM security_identities
+                WHERE security_id = NEW.security_id
+            )
+            BEGIN SELECT RAISE(ABORT, 'security is missing'); END;
+            CREATE TABLE security_identities__bats_migration AS
+                SELECT * FROM security_identities WHERE 0;
             """
         )
         conn.commit()
@@ -142,6 +152,14 @@ def test_ensure_schema_expands_legacy_mic_constraints(tmp_path) -> None:
         assert conn.execute(
             "SELECT security_id, mic, provider_symbol FROM security_identities"
         ).fetchall() == [("security", "XNAS", "AAPL")]
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+            "AND name='identity_audit_requires_security'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name LIKE '%bats_migration%'"
+        ).fetchone() is None
+        conn.execute("INSERT INTO identity_audit VALUES ('security')")
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
