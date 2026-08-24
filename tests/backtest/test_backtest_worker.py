@@ -997,6 +997,15 @@ def test_preparation_missing_evidence_uses_required_data_code(
         "discover_strategies",
         lambda _root: type("D", (), {"strategies": (desc,)})(),
     )
+    stages: list[str] = []
+    original_set_stage = repo.set_strategy_job_current_stage
+
+    def record_stage(*args, **kwargs):
+        result = original_set_stage(*args, **kwargs)
+        stages.append(result.current_stage or "")
+        return result
+
+    monkeypatch.setattr(repo, "set_strategy_job_current_stage", record_stage)
 
     class Missing(ValueError):
         code = "required_data_missing"
@@ -1011,3 +1020,4 @@ def test_preparation_missing_evidence_uses_required_data_code(
     ).run(a.job.id, c.claim_token)  # type: ignore[arg-type]
     assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
     assert result.failure_detail == "Required selected evidence is unavailable"
+    assert stages == ["evidence_selection"]
