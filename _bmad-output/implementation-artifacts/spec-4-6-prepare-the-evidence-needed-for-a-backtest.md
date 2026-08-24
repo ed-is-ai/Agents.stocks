@@ -69,6 +69,7 @@ final_revision: '7ea6a1a9'
 - [x] [Follow-up][Patch] Expand persisted MIC constraints and migrate existing immutable identity/alias/snapshot tables for Cboe BZX (`BATS`); fail directly on new identity constraint violations instead of masking them as canonical-identity conflicts [app/repositories/backtest_repo.py] — resolved and live-verified
 - [x] [Follow-up][Patch] Persist and render safe stage-specific Bootstrap failure details for controlled provider, roster, persistence, and activation errors while reducing unexpected exceptions to their type plus a server-log instruction [app/services/backtest/strategy_bootstrap_service.py; app/api/templates/_bootstrap_activity.html] — resolved and regression-tested
 - [x] [Follow-up][Patch] Render actionable readiness recoveries as links to their existing workflows; Coverage `Initialize` was a non-interactive badge despite the initialization route already existing [app/api/templates/_strategy_readiness.html] — resolved and regression-tested
+- [x] [Follow-up][Patch] Swap expected Strategy Manager `422` validation and `409` conflict responses into their form targets; initialization correctly returned linked errors for invalid months, but HTMX's default 4xx handling discarded the fragment and made submit appear inert [app/api/static/js/strategy-manager.js] — resolved and regression-tested
 
 ## Design Notes
 
@@ -90,6 +91,7 @@ The worker must not mark all stages complete before performing their work. Evide
 - 2026-08-24: Added the missing SQLite BATS constraint migration after a production-equivalent roster commit exposed the later persistence boundary; live qualification, 876-identity commit, and profile construction now complete against a fresh database.
 - 2026-08-24: Replaced generic Bootstrap evidence failures with safe stage-specific activity details, including provider HTTP status and actionable database-integrity categories without exposing arbitrary exception text.
 - 2026-08-24: Made readiness recovery actions navigable, including Coverage `Initialize` linking to the historical initialization form.
+- 2026-08-24: Enabled scoped HTMX swaps for expected Strategy Manager form validation/conflict responses so invalid initialization months show their server-rendered errors instead of appearing to do nothing.
 
 ## Review Triage Log
 
