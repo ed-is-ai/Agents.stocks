@@ -66,6 +66,7 @@ final_revision: '7ea6a1a9'
 - [x] [Review][Patch] Provide a supported Bootstrap qualification-failure recovery and retain a safe failure reason; the reported “Historical data qualification is not available” screen offered only deletion, while `_run_qualification()` discarded the recorded provider reason [app/services/backtest/strategy_bootstrap_service.py:152] — resolved in follow-up
 - [x] [Follow-up][Patch] Restore live Bootstrap qualification after yfinance began returning DataFrame-valued history metadata and changed the GBP/USD probe timezone/session contract [app/services/backtest/historical_price_evidence.py; app/services/backtest/strategy_bootstrap_service.py] — resolved and live-verified
 - [x] [Follow-up][Patch] Restore live Bootstrap roster capture against the maintained DataHub constituents schema, resolve DataHub identities in one bounded TradingView batch, apply provider-symbol differences through the versioned `config/provider_symbol_aliases.json` mapping, support Cboe BZX (`BATS`), and accept TradingView's `GBX` code while preserving the economic GBP/GBp contract [app/services/backtest/reconstruction_roster.py; app/integrations/tv_screener.py; config/provider_symbol_aliases.json] — resolved and live-verified
+- [x] [Follow-up][Patch] Expand persisted MIC constraints and migrate existing immutable identity/alias/snapshot tables for Cboe BZX (`BATS`); fail directly on new identity constraint violations instead of masking them as canonical-identity conflicts [app/repositories/backtest_repo.py] — resolved and live-verified
 
 ## Design Notes
 
@@ -84,6 +85,7 @@ The worker must not mark all stages complete before performing their work. Evide
 
 - 2026-08-24: Normalized yfinance DataFrame metadata for deterministic response digests and aligned the GBP/USD production probe with the provider's current London timezone and New Year's Day session.
 - 2026-08-24: Updated Bootstrap roster evidence for the maintained DataHub schema, batched TradingView identity evidence, config-backed class-share aliases, BATS listings, and TradingView GBX normalization; live capture normalized 876 members from all three required sources.
+- 2026-08-24: Added the missing SQLite BATS constraint migration after a production-equivalent roster commit exposed the later persistence boundary; live qualification, 876-identity commit, and profile construction now complete against a fresh database.
 
 ## Review Triage Log
 
