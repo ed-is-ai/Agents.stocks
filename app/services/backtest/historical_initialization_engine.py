@@ -126,6 +126,12 @@ class CanonicalSnapshotMonthProcessor:
         self._clock = clock
         self._project_root = project_root or Path(__file__).resolve().parents[3]
         self._lease = lease
+        # Every month in one initialization run asks for the same immutable
+        # full-history evidence window. Re-validating and deserializing that
+        # payload for each security/month pair dominates long reruns, while
+        # keeping it in this process-local cache preserves the repository's
+        # verification on the first read and does not alter persisted output.
+        self._evidence_cache: dict[tuple[str, str, str, str, str], object] = {}
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
@@ -323,6 +329,17 @@ class CanonicalSnapshotMonthProcessor:
         )
 
     def _evidence_for(self, member, request: HistoricalEvidenceRequest):
+        cache_key = (
+            member.security_id,
+            member.provider_symbol,
+            request.alias_revision,
+            request.start.isoformat(),
+            request.end.isoformat(),
+        )
+        cached = self._evidence_cache.get(cache_key)
+        if cached is not None:
+            self._validate_cached_evidence(cached, request)
+            return cached
         evidence = self._price_repository.find_request(
             security_id=member.security_id,
             requested_symbol=member.provider_symbol,
@@ -360,6 +377,7 @@ class CanonicalSnapshotMonthProcessor:
             revision = self._price_repository.commit(payload)
             evidence = self._price_repository.verify(revision)
         self._validate_cached_evidence(evidence, request)
+        self._evidence_cache[cache_key] = evidence
         return evidence
 
     @staticmethod
