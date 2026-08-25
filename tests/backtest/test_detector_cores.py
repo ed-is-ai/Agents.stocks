@@ -230,6 +230,25 @@ def test_vcp_accepts_a_recent_no_volume_window_as_a_valid_non_breakout() -> None
     assert vcp.vcp.dry_up_ratio is None
 
 
+def test_vcp_calculator_skips_a_local_low_above_its_swing_high() -> None:
+    calculator = detector_module._calculator_module("vcp_pattern_calculator")
+
+    contractions = calculator._build_contractions_from(
+        (0, 10.0),
+        [(0, 10.0), (2, 12.0), (4, 11.0)],
+        [(1, 9.0), (3, 13.0), (5, 8.0)],
+        [10.0, 11.0, 12.0, 13.0, 11.0, 9.0],
+        [9.0, 9.0, 11.0, 13.0, 10.0, 8.0],
+        [f"2021-01-{day:02d}" for day in range(1, 7)],
+        min_contraction_days=1,
+    )
+
+    assert [(item["high_price"], item["low_price"]) for item in contractions] == [
+        (10.0, 9.0)
+    ]
+    assert all(item["depth_pct"] >= 0 for item in contractions)
+
+
 def test_vcp_adapter_rejects_coerced_or_missing_calculator_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

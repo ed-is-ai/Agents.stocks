@@ -103,6 +103,7 @@ The worker must not mark all stages complete before performing their work. Evide
 - 2026-08-24: Recovered production historical initialization across real exchange-calendar gaps and changing alias revisions: use canonical exchange-session observations, safely rebind compatible immutable evidence, classify legitimate pre-listing/insufficient-history gaps, and retain the original provider failure reason in the activity.
 - 2026-08-24: Made persisted snapshot profiles authoritative for in-flight initialization while retaining runtime-authority validation for new work, and added the required SQLite migration for the expanded immutable exclusion vocabulary.
 - 2026-08-24: Completed the first resumed production run through December 2018 after an interrupted worker, proving cached monthly scans are reused across supported restart children.
+- 2026-08-25: Rejected false VCP contractions where a later local low is above its preceding swing high; the malformed negative depth first surfaced in PSKY's January 2021 reconstruction and is now regression-tested. The detector authority changes, so active-profile refresh is required before reconstructing further months.
 
 ## Review Triage Log
 
