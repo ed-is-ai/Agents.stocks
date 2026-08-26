@@ -4,6 +4,7 @@ type: 'performance'
 created: '2026-08-26'
 status: 'done'
 baseline_revision: 'dd3428b2dc2454f76d1779978e359f5494c70e09'
+final_revision: 'c4bea0323fd8f24620bcf0d82781bc6c663d4355'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: ['{project-root}/_bmad-output/implementation-artifacts/epic-4-context.md']
@@ -49,10 +50,10 @@ warnings: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `app/repositories/backtest_repo.py` -- implement an explicit revision/content identity for committed snapshot coverage and a thread-safe verified-summary cache scoped by repository/database and profile -- avoid repeated full manifest verification while retaining fail-closed integrity behavior.
-- [ ] `app/repositories/backtest_repo.py` -- invalidate or bypass cached entries on every supported coverage/profile mutation and on any revision/content mismatch -- prevent stale data after commits, invalidation, deletion, or corruption.
-- [ ] `tests/backtest/test_snapshot_coverage_repository.py` -- add deterministic tests for cache hits, profile separation, all mutation invalidations, corruption, concurrent readers/writers, and process/repository restart reconstruction -- prove the acceptance contract without timing flakiness.
-- [ ] `tests/backtest/test_snapshot_coverage_repository.py` -- instrument verification and record representative before/after call-count/timing evidence in test output or a documented test note -- make the performance improvement reviewable.
+- [x] `app/repositories/backtest_repo.py` -- implement an explicit revision/content identity for committed snapshot coverage and a thread-safe verified-summary cache scoped by repository/database and profile -- avoid repeated full manifest verification while retaining fail-closed integrity behavior.
+- [x] `app/repositories/backtest_repo.py` -- invalidate or bypass cached entries on every supported coverage/profile mutation and on any revision/content mismatch -- prevent stale data after commits, invalidation, deletion, or corruption.
+- [x] `tests/backtest/test_snapshot_coverage_repository.py` -- add deterministic tests for cache hits, profile separation, all mutation invalidations, corruption, concurrent readers/writers, and process/repository restart reconstruction -- prove the acceptance contract without timing flakiness.
+- [x] `tests/backtest/test_snapshot_coverage_repository.py` -- instrument verification and record representative before/after call-count/timing evidence in test output or a documented test note -- make the performance improvement reviewable.
 
 **Acceptance Criteria:**
 - Given unchanged committed coverage for one profile, when coverage is requested repeatedly, then only the first request fully verifies the write sets and later requests reuse the valid summary.
