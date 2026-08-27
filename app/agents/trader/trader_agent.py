@@ -734,6 +734,45 @@ class TraderAgent(Agent):
         rows = self._trades.open_rows(portfolio_id)
         return self._compute_positions(rows, current_prices, display_info)
 
+    def get_portfolio_from_trades(
+        self,
+        trades: list[Trade],
+        current_prices: dict[str, float] | None = None,
+        display_info: dict[str, tuple[float, str]] | None = None,
+    ) -> list[Position]:
+        """Compute positions from one already-read trade snapshot.
+
+        ``get_trade_history()`` is intentionally presentation-ordered, while
+        position replay must retain ``TradesRepository.open_rows()`` ordering.
+        Reconstruct that ordered, valid-ticker projection here so a request
+        can share one trade read between holdings, chart markers, and opening
+        lot indicators without changing average-cost semantics.
+        """
+        ordered = sorted(
+            (trade for trade in trades if trade.ticker not in {"", "n/a", "N/A"}),
+            key=lambda trade: (
+                trade.date,
+                -(trade.source_row_index if trade.source_row_index is not None else -1),
+                trade.idempotency_key is not None,
+                trade.idempotency_key or "",
+                trade.id is not None,
+                trade.id or 0,
+            ),
+        )
+        rows = [
+            (
+                trade.ticker,
+                trade.action,
+                trade.shares,
+                trade.price,
+                trade.date,
+                trade.stop_loss,
+                trade.entry_price,
+            )
+            for trade in ordered
+        ]
+        return self._compute_positions(rows, current_prices, display_info)
+
     @staticmethod
     def _compute_positions(
         rows: list[tuple[Any, ...]],
@@ -893,10 +932,13 @@ class TraderAgent(Agent):
 
         disp = display_info.get(ticker) if display_info else None
         currency = disp[1] if disp else "GBP"
-        is_usd = currency == "USD"
+        # Display metadata is the native quote unit.  Every non-GBP unit
+        # must use its native close so current value/P&L never combines a
+        # GBP-normalised close with a native-currency cost basis.
+        is_native_quote = currency != "GBP"
 
-        if is_usd and disp is not None:
-            # Use original USD price so cost (USD) and value (USD) are comparable
+        if is_native_quote and disp is not None:
+            # Use original native price so cost and value are comparable.
             cp: float | None = disp[0]
         else:
             cp = current_prices.get(ticker) if current_prices else None
@@ -1203,6 +1245,20 @@ class TraderAgent(Agent):
                 f"provider (expected {contract.provider_id!r}, got "
                 f"{provider_id!r})"
             )
+
+        # Every downstream phase reads canonical field keys, never raw
+        # provider column names -- ``_detect_reconciliation_issues`` is the
+        # one exception: it's independently unit-tested against raw
+        # column-name dicts, so it keeps reading ``rows`` (the raw rows)
+        # directly rather than the normalized view below.
+        normalized_rows = [
+            ContractNormalizer.normalize_row(contract, row) for row in rows
+        ]
+        # GH-311: one canonical-row digest per source row, computed once up
+        # front from the normalized (never raw) view -- reused below to
+        # build each row's lineage entry without persisting any raw
+        # financial CSV content.
+        row_digests = [canonical_row_digest(row) for row in normalized_rows]
 
         # Symmetric with the provider check above, not skippable by
         # omission: a contract that declares account types requires one: a

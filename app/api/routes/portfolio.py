@@ -152,12 +152,17 @@ async def refresh_portfolio_prices(
 ) -> HTMLResponse:
     """Fetch live prices from yfinance and return the updated portfolio partial."""
     pid = optional_int(portfolio_id)
+    input_snapshot = None
     try:
-        positions = trader.get_portfolio(portfolio_id=pid)
+        input_snapshot = portfolio.portfolio_input_snapshot(pid)
+        positions = portfolio.positions_from_input_snapshot(input_snapshot)
         logger.info("Refreshing %d positions", len(positions))
         if not positions:
             context = portfolio.portfolio_partial_context(
-                [], error_message="No positions to refresh", portfolio_id=pid
+                [],
+                error_message="No positions to refresh",
+                portfolio_id=pid,
+                input_snapshot=input_snapshot,
             )
             return templates.TemplateResponse(
                 request, "_portfolio.html", context=context, status_code=400
@@ -165,39 +170,87 @@ async def refresh_portfolio_prices(
 
         gbpusd = portfolio.gbpusd_rate()
         tickers = [p.ticker for p in positions]
-        gbp_prices, display_info = portfolio.fetch_all_prices(
-            tickers, portfolio.load_ticker_aliases(), gbpusd
+        cached_prices, _cached_as_of, cached_display = trader.load_price_cache()
+        gbp_prices, display_info, failed_tickers = (
+            portfolio.fetch_all_prices_with_failures(
+                tickers, portfolio.load_ticker_aliases(), gbpusd
+            )
         )
 
         trader.save_price_cache(gbp_prices, display_info)
         _, prices_as_of, _ = trader.load_price_cache()
-        updated_positions = trader.refresh_portfolio_prices(
-            gbp_prices, display_info, pid
+        # A partial provider response must not make an otherwise valid
+        # holding disappear.  Fresh values win; only failed symbols inherit
+        # their previous cached price/display metadata.
+        effective_prices = {
+            ticker: gbp_prices[ticker]
+            if ticker in gbp_prices
+            else cached_prices[ticker]
+            for ticker in tickers
+            if ticker in gbp_prices or ticker in cached_prices
+        }
+        effective_display = {
+            ticker: display_info[ticker]
+            if ticker in display_info
+            else cached_display[ticker]
+            for ticker in tickers
+            if ticker in display_info or ticker in cached_display
+        }
+        cached_fallbacks = sorted(
+            ticker for ticker in failed_tickers if ticker in cached_prices
+        )
+        unavailable = sorted(failed_tickers - set(cached_fallbacks))
+        warning_parts: list[str] = []
+        if cached_fallbacks:
+            warning_parts.append(
+                "using cached values for: " + ", ".join(cached_fallbacks)
+            )
+        if unavailable:
+            warning_parts.append("prices unavailable for: " + ", ".join(unavailable))
+        updated_positions = portfolio.positions_from_input_snapshot(
+            input_snapshot, effective_prices, effective_display
         )
         logger.info("Refreshed %d positions successfully", len(updated_positions))
-        cash_balance = trader.get_cash_balance(pid)
+        cash_balance = input_snapshot.cash_balance
         trader.update_portfolio_snapshot(cash_balance, pid)
+        input_snapshot = portfolio.with_current_chart_data(input_snapshot, pid)
         context = portfolio.portfolio_partial_context(
             updated_positions,
             prices_as_of=prices_as_of,
             gbpusd_rate=gbpusd,
             cash_balance=cash_balance,
+            warning_message=(
+                "Prices refreshed partially; " + "; ".join(warning_parts)
+                if warning_parts
+                else None
+            ),
             portfolio_id=pid,
+            input_snapshot=input_snapshot,
         )
         return templates.TemplateResponse(request, "_portfolio.html", context=context)
     except Exception as e:
         logger.exception("Failed to refresh portfolio prices: %s", e)
         cached_prices, prices_as_of, display_info = trader.load_price_cache()
-        cached_positions = trader.get_portfolio(
-            cached_prices or None, display_info or None, pid
-        )
+        if input_snapshot is None:
+            # If the initial snapshot itself could not be built, retain the
+            # established fallback read. Once it exists, though, the error
+            # response must render from that same request snapshot too.
+            cached_positions = trader.get_portfolio(
+                cached_prices or None, display_info or None, pid
+            )
+        else:
+            cached_positions = portfolio.positions_from_input_snapshot(
+                input_snapshot, cached_prices or None, display_info or None
+            )
         gbpusd = cached_prices.get("__GBPUSD__")
         context = portfolio.portfolio_partial_context(
             cached_positions,
             prices_as_of=prices_as_of,
             gbpusd_rate=gbpusd,
+            cash_balance=(input_snapshot.cash_balance if input_snapshot else None),
             error_message=f"Failed to fetch prices: {e}",
             portfolio_id=pid,
+            input_snapshot=input_snapshot,
         )
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=500
@@ -365,7 +418,6 @@ async def import_sipp(
             request, "_portfolio.html", context=context, status_code=400
         )
 
-    positions = trader.get_portfolio(portfolio_id=pid)
     cash_balance = result.cash_balance
     if cash_balance == 0.0:
         # 0.0 is ambiguous: SippImportResult.cash_balance can't represent
@@ -383,8 +435,13 @@ async def import_sipp(
             cash_balance = trader.get_cash_balance(pid)
         except Exception:
             logger.exception("Failed to re-read cash balance after import")
+    input_snapshot = portfolio.portfolio_input_snapshot(pid, cash_balance=cash_balance)
+    positions = portfolio.positions_from_input_snapshot(input_snapshot)
     context = portfolio.portfolio_partial_context(
-        positions, cash_balance=cash_balance, portfolio_id=pid
+        positions,
+        cash_balance=cash_balance,
+        portfolio_id=pid,
+        input_snapshot=input_snapshot,
     )
     # Reuses the same cash_balance the page just rendered so the response
     # message can never disagree with what the page shows (AC1) -- e.g. a
