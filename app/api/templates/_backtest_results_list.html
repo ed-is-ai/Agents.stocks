@@ -20,27 +20,24 @@
       <thead><tr><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
       <tbody>
         {% for item in backtest_activities %}
-        {% set detail_url = "/strategy-manager/results/" ~ item.job.id if item.job.status.value == 'complete' else "/strategy-manager/activities/" ~ item.job.id %}
+        {% set activity = item.activity %}
+        {% set detail_url = "/strategy-manager/results/" ~ activity.job.id if activity.job.status.value == 'complete' else "/strategy-manager/activities/" ~ activity.job.id %}
         <tr>
-          <td><a href="{{ detail_url }}" hx-get="{{ detail_url }}" hx-target="#tab-content" hx-swap="innerHTML">{{ item.strategy_id }} attempt {{ item.job.enqueue_seq }}</a></td>
-          <td>{{ item.job.status.value|title }}{% if item.job.status.value == 'running' and item.job.cancel_requested_at %} (cancellation requested){% endif %}</td>
-          <td class="mono-num">{{ item.strategy_id }} v{{ item.strategy_api_version }}</td>
-          <td class="text-wrap">{{ item.parameter_summary }}</td>
-          <td class="mono-num">{{ item.start_month }} to {{ item.end_month }}</td>
+          <td><a href="{{ detail_url }}" hx-get="{{ detail_url }}" hx-target="#tab-content" hx-swap="innerHTML">{{ activity.strategy_id }} attempt {{ activity.job.enqueue_seq }}</a></td>
+          <td>{{ activity.job.status.value|title }}{% if activity.job.status.value == 'running' and activity.job.cancel_requested_at %} (cancellation requested){% endif %}</td>
+          <td class="mono-num">{{ activity.strategy_id }} v{{ activity.strategy_api_version }}</td>
+          <td class="text-wrap">{{ activity.parameter_summary }}</td>
+          <td class="mono-num">{{ activity.start_month }} to {{ activity.end_month }}</td>
           <td class="mono-num">
-            {%- if item.metrics and item.job.status.value == 'complete' -%}
-              {{ '%.2f'|format(item.metrics.total_return * 100) }}%
+            {%- if item.metrics and activity.job.status.value == 'complete' -%}
+              <span{% if item.metrics.total_return.css_class %} class="{{ item.metrics.total_return.css_class }}"{% endif %}>{{ item.metrics.total_return.value }}</span>
             {%- else -%}
               <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
             {%- endif -%}
           </td>
           <td class="mono-num">
-            {%- if item.job.status.value == 'complete' and item.metrics -%}
-              {%- if item.metrics.win_rate is none -%}
-                Not applicable — no closed trades
-              {%- else -%}
-                {{ '%.1f'|format(item.metrics.win_rate * 100) }}%
-              {%- endif -%}
+            {%- if activity.job.status.value == 'complete' and item.metrics -%}
+              {{ item.metrics.win_rate.value }}
             {%- else -%}
               <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
             {%- endif -%}
