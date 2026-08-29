@@ -65,7 +65,10 @@ from app.services.backtest.strategy_job import (
     StrategyJobType,
     StrategyJobV1,
 )
-from app.api.routes.strategy_manager import _bootstrap_stage_progress
+from app.api.routes.strategy_manager import (
+    _backtest_progress,
+    _bootstrap_stage_progress,
+)
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
@@ -146,6 +149,8 @@ class FakeRepo:
         self.bootstrap = SimpleNamespace(job_id="job-1")
         self.bootstrap_run_calls = 0
         self.active_profile_calls = 0
+        self.strategy_run_start = "2024-01"
+        self.strategy_run_end = "2024-03"
         # Story gh-367: pinned roster identities for Trade Log label
         # resolution. Includes the event fixtures' ``SEC1`` so rendered
         # Security cells show a readable ticker/exchange label.
@@ -285,7 +290,9 @@ class FakeRepo:
 
     def strategy_run(self, _job_id):
         return SimpleNamespace(
-            strategy_id="momentum_v1", start_month="2024-01", end_month="2024-03"
+            strategy_id="momentum_v1",
+            start_month=self.strategy_run_start,
+            end_month=self.strategy_run_end,
         )
 
     def list_backtest_activities(self):
@@ -745,6 +752,132 @@ def test_backtest_activity_status_poll_uses_the_backtest_template(services):
     )
     assert response.status_code == 200
     assert "Backtest activity" in response.text
+
+
+def test_backtest_progress_uses_inclusive_calendar_boundaries():
+    one_month = SimpleNamespace(start_month="2024-02", end_month="2024-02")
+    year_boundary = SimpleNamespace(start_month="2023-12", end_month="2024-02")
+
+    assert _backtest_progress(one_month, "2024-02") == {
+        "position": 1,
+        "total": 1,
+        "percentage": 100.0,
+    }
+    assert _backtest_progress(year_boundary, "2023-12") == {
+        "position": 1,
+        "total": 3,
+        "percentage": pytest.approx(33.33333333333333),
+    }
+    assert _backtest_progress(year_boundary, "2024-03") is None
+    assert (
+        _backtest_progress(
+            SimpleNamespace(start_month="2024-03", end_month="2024-02"), "2024-02"
+        )
+        is None
+    )
+
+
+def test_backtest_activity_shows_inclusive_progress_and_project_buttons(services):
+    repo, jobs = services
+    jobs.actions = ("restart",)
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=5,
+        current_month="2024-02",
+        cancel_requested_at=datetime(2024, 2, 1, tzinfo=timezone.utc),
+        failed_month=None,
+        failure_detail=None,
+    )
+
+    response = client.get("/strategy-manager/activities/job-1")
+
+    assert response.status_code == 200
+    assert "Month 2 of 3" in response.text
+    assert 'role="progressbar"' in response.text
+    assert 'aria-valuemin="1"' in response.text
+    assert 'aria-valuemax="3"' in response.text
+    assert 'aria-valuenow="2"' in response.text
+    assert 'style="width: 66.67%"' in response.text
+    assert "Stopping after this month" in response.text
+    assert 'class="sm-btn sm-btn-primary">Restart backtest</button>' in response.text
+    assert response.text.count('role="status"') == 1
+
+
+def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
+    services,
+):
+    repo, _ = services
+    repo.strategy_run_start = "2023-12"
+    repo.strategy_run_end = "2024-02"
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=6,
+        current_month="2024-02",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+
+    updated = client.get(
+        "/strategy-manager/activities/job-1/status?last_seen_version=5"
+    )
+
+    assert updated.status_code == 200
+    assert "Month 3 of 3" in updated.text
+    assert 'aria-valuenow="3"' in updated.text
+    assert 'style="width: 100.00%"' in updated.text
+
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=7,
+        current_month="2024-04",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    invalid = client.get("/strategy-manager/activities/job-1")
+
+    assert invalid.status_code == 200
+    assert 'role="progressbar"' not in invalid.text
+    assert "Month " not in invalid.text
+
+    for status, current_month in (
+        (StrategyJobStatus.QUEUED, None),
+        (StrategyJobStatus.RUNNING, None),
+        (StrategyJobStatus.COMPLETE, None),
+    ):
+        repo.activity = SimpleNamespace(
+            id="job-1",
+            job_type=StrategyJobType.BACKTEST,
+            status=status,
+            status_version=8,
+            current_month=current_month,
+            cancel_requested_at=None,
+            failed_month=None,
+            failure_detail=None,
+        )
+        response = client.get("/strategy-manager/activities/job-1")
+        assert 'role="progressbar"' not in response.text
+
+    unchanged = client.get(
+        "/strategy-manager/activities/job-1/status?last_seen_version=8"
+    )
+    assert unchanged.status_code == 204
+    assert unchanged.text == ""
+
+
+def test_configuration_run_backtest_uses_project_primary_button(launch):
+    response = client.get("/strategy-manager/configuration")
+
+    assert response.status_code == 200
+    assert 'class="sm-btn sm-btn-primary mt-3" type="submit"' in response.text
+    assert ".sm-btn:disabled," in Path("app/api/static/css/theme.css").read_text()
 
 
 @pytest.mark.parametrize(
@@ -1720,6 +1853,7 @@ def test_backtests_list_renders_rows(services):
                     enqueue_seq=3,
                     status=StrategyJobStatus.COMPLETE,
                     cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
                 ),
             ),
             strategy_id="momentum_v1",
@@ -1736,12 +1870,48 @@ def test_backtests_list_renders_rows(services):
     )
     response = client.get("/strategy-manager/backtests")
     assert response.status_code == 200
-    assert "momentum_v1 attempt 3" in response.text
+    assert "Attempt 3" in response.text
+    assert "momentum_v1 · v1" in response.text
+    assert "badge-status status-ok" in response.text
     assert "lookback=20" in response.text
     assert "+12.5%" in response.text
     assert "50.0%" in response.text
     assert '<span class="pos">+12.5%</span>' in response.text
-    assert response.text.count('<th scope="col">') == 7
+    # Run column: header, a <time> cell with a machine-readable datetime, and
+    # the human relative label rendered from job.created_at.
+    assert '<th scope="col">Run</th>' in response.text
+    assert 'datetime="2024-01-05T09:00:00+00:00"' in response.text
+    assert "2024-01-05 09:00 UTC" in response.text
+
+
+def test_backtests_list_failed_row_renders_error_chip(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        BacktestActivitySummaryV1(
+            job=cast(
+                StrategyJobV1,
+                SimpleNamespace(
+                    id="job-failed",
+                    enqueue_seq=4,
+                    status=StrategyJobStatus.FAILED,
+                    cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            strategy_id="momentum_v1",
+            strategy_api_version=1,
+            parameter_summary="lookback=20",
+            start_month="2024-01",
+            end_month="2024-02",
+            metrics=None,
+            metric_availability=None,
+        ),
+    )
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "badge-status status-error" in response.text
+    assert ">Failed</span>" in response.text
+    assert "status-ok" not in response.text
 
 
 def test_backtests_list_empty_state(services):
@@ -2428,6 +2598,7 @@ def test_backtests_list_links_complete_row_to_result_url(services):
                     enqueue_seq=1,
                     status=StrategyJobStatus.COMPLETE,
                     cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
                 ),
             ),
             strategy_id="momentum_v1",
@@ -2448,6 +2619,7 @@ def test_backtests_list_links_complete_row_to_result_url(services):
                     enqueue_seq=2,
                     status=StrategyJobStatus.RUNNING,
                     cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
                 ),
             ),
             strategy_id="momentum_v1",
