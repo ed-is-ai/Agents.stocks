@@ -2,13 +2,14 @@
 title: 'Plain-language and declutter pass on backtest result and comparison pages'
 type: 'feature'
 created: '2026-08-29'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: []
 warnings: []
 github_issue: 412
 baseline_revision: '29abbc4b'
+final_revision: 'b2d0ce41'
 ---
 
 <intent-contract>

@@ -630,7 +630,9 @@ def test_initialization_uses_plain_copy_and_describes_preparation_history(servic
     assert "Prepared 2024-01 to 2024-03" in response.text
     assert "just now" in response.text
     assert ">Complete: opaque-initialization-id<" not in response.text
-    assert 'href="/strategy-manager/activities/opaque-initialization-id"' in response.text
+    assert (
+        'href="/strategy-manager/activities/opaque-initialization-id"' in response.text
+    )
 
 
 def test_initialization_history_omits_job_when_its_run_cannot_be_loaded(services):
@@ -2230,7 +2232,7 @@ def test_result_page_formats_display_only_pnl_and_metric_tones(services):
     assert response.status_code == 200
     assert "£10,000.00" in response.text
     assert "P&amp;L" in response.text
-    assert '-£250.00' in response.text
+    assert "-£250.00" in response.text
     assert '<div class="sval neg">-2.5%</div>' in response.text
     assert '<div class="sval neg">-10.0%</div>' in response.text
 
