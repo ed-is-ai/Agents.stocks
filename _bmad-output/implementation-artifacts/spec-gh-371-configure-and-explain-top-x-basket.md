@@ -2,8 +2,9 @@
 title: 'Configure and explain the top-X basket'
 type: 'feature'
 created: '2026-08-29'
-status: 'in-review'
+status: 'done'
 baseline_revision: '16daf497f3b95a158270daa54608bd41ad97f46b'
+final_revision: '29616ad1b77fdbfcb9faf5271eb57cf6d2f9cf71'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
