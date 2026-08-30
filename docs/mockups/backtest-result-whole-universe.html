@@ -161,13 +161,22 @@
         <summary>Selected securities — 772 of 874 roster members (102 excluded)</summary>
         <p class="small muted" style="margin:.5rem 0 0">
           Resolved server-side from the start month (2026-07) snapshot:
-          every member wit Tickers shown in place of the opaque
-          <code>security_id</code> UUIDs the app stores.
+          every member with <code>resolution='valid_scan'</code>. Sorted,
+          deduplicated, and bound into the run input manifest digest.
+          Tickers shown in place of the opaque <code>security_id</code>
+          UUIDs the app stores.
         </p>
-        <ul class="id-list" id="id-list" aria-label="Selected securitieut
-          manifest digest.
+        <p class="small" style="margin:.5rem 0 0">
+          <strong>Why 102 are excluded:</strong> a member needs an unbroken
+          252-trading-session price history at the snapshot date to be
+          runnable. 98 members have gaps in that window
+          (<code>incomplete_detector_history</code> — 96 of them are LSE
+          names missing exactly one session, likely a UK-calendar
+          misalignment); 4 members are recently listed with less than 252
+          sessions of lifetime data
+          (<code>insufficient_detector_history</code>).
         </p>
-        <ul class="id-list" id="id-list" aria-label="Selected security IDs"></ul>
+        <ul class="id-list" id="id-list" aria-label="Selected securities"></ul>
       </details>
     </div>
   </article>
@@ -203,7 +212,7 @@
           <tr>
             <td>874</td>
             <td>772</td>
-            <td>102 <span class="badge badge-excluded">newly listed / no history</span></td>
+            <td>102 <span class="badge badge-excluded">98 history gaps · 4 recently listed</span></td>
             <td>whole universe (host-resolved)</td>
           </tr>
         </tbody>
