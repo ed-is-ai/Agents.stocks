@@ -63,14 +63,21 @@
     margin: .75rem 0 0;
     padding: 0;
     list-style: none;
-    columns: 3;
-    column-gap: 2rem;
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 0 1.25rem;
     font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: .78rem;
     max-height: 22rem;
-    overflow: auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
-  details.universe .id-list li { padding: .1rem 0; break-inside: avoid; }
+  details.universe .id-list li {
+    padding: .1rem 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .stat-cards { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
   .stat-card {
     border: 1px solid var(--border);
