@@ -621,6 +621,36 @@ def test_direct_strategy_pages_render_inside_the_application_shell(
     assert 'id="tab-strategy-manager"' in response.text
 
 
+def test_direct_strategy_result_pages_render_inside_the_application_shell(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+
+    for path in (
+        "/strategy-manager/backtests",
+        f"/strategy-manager/results/{RESULT_RUN_ID}",
+        f"/strategy-manager/compare?run_id={RESULT_RUN_ID}",
+    ):
+        response = client.get(path, headers={"Accept": "text/html"})
+
+        assert response.status_code == 200
+        assert "<!doctype html>" in response.text
+        assert '<link rel="stylesheet" href="/static/css/theme.css">' in response.text
+        assert 'id="tab-strategy-manager"' in response.text
+
+    repo.result_b = _result(run_id="run-2")
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.get(
+        "/strategy-manager/comparisons/run-1/run-2",
+        headers={"Accept": "text/html"},
+    )
+
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text
+    assert '<link rel="stylesheet" href="/static/css/theme.css">' in response.text
+    assert 'id="tab-strategy-manager"' in response.text
+
+
 def test_readiness_and_landing_use_plain_language(services):
     # gh-398: enum values render through plain-language label maps and each
     # readiness prerequisite name carries a one-line `title` tooltip.
@@ -2024,6 +2054,14 @@ def test_configuration_renders_wizard_shell(launch):
     assert 'data-wizard-step="1"' in text
     assert 'data-wizard-step="2"' in text
     assert 'data-wizard-step="3"' in text
+
+    direct = client.get(
+        "/strategy-manager/configuration", headers={"Accept": "text/html"}
+    )
+    assert direct.status_code == 200
+    assert "<!doctype html>" in direct.text
+    assert '<link rel="stylesheet" href="/static/css/theme.css">' in direct.text
+    assert 'id="tab-strategy-manager"' in direct.text
 
 
 def test_configuration_all_steps_visible_without_js(launch):

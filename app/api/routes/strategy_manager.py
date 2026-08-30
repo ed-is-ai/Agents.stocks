@@ -483,7 +483,7 @@ async def strategy_manager(
     readiness: ReadinessDep,
     bootstrap: BootstrapDep,
     setup: str | None = None,
-) -> HTMLResponse:
+) -> Response:
     started = perf_counter()
     try:
         ready_count, coverage_ready = _readiness_progress(readiness.evaluate())
@@ -642,7 +642,7 @@ async def strategy_readiness(
     backtest: BacktestDep,
     readiness: ReadinessDep,
     section: str | None = None,
-) -> HTMLResponse:
+) -> Response:
     """Show readiness prerequisite rows (read-only).
 
     ``section=advanced`` (the diagnostics deep link) expands the
@@ -1142,7 +1142,7 @@ async def strategy_configuration(
     backtest: BacktestDep,
     strategy_id: str | None = None,
     reset: str | None = None,
-) -> HTMLResponse:
+) -> Response:
     """Render the launch form: one fresh discovery + coverage projection
     (Story 2.7 AC 1)."""
     context = _configuration_context(
@@ -1151,7 +1151,7 @@ async def strategy_configuration(
         selected_strategy_id=strategy_id,
         recall=reset != "defaults" and strategy_id is None,
     )
-    return templates.TemplateResponse(request, "_strategy_configuration.html", context)
+    return _strategy_fragment(request, "_strategy_configuration.html", context)
 
 
 @router.get("/strategy-manager/configuration/fields", response_class=HTMLResponse)
@@ -1372,9 +1372,9 @@ async def submit_strategy_configuration(
 
 
 @router.get("/strategy-manager/backtests", response_class=HTMLResponse)
-async def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLResponse:
+async def strategy_backtests(request: Request, backtest: BacktestDep) -> Response:
     """Render the standalone Backtest results list (Story 2.8 AC 2, 7)."""
-    return templates.TemplateResponse(
+    return _strategy_fragment(
         request, "_backtest_results_list.html", _backtest_activities_context(backtest)
     )
 
@@ -1732,12 +1732,12 @@ async def backtest_result_view(
     try:
         context = _result_context(backtest, run_id)
     except BacktestIntegrityError as exc:
-        return templates.TemplateResponse(
+        return _strategy_fragment(
             request,
             "_backtest_result.html",
             {"run_id": run_id, "integrity_error": str(exc)},
         )
-    return templates.TemplateResponse(request, "_backtest_result.html", context)
+    return _strategy_fragment(request, "_backtest_result.html", context)
 
 
 @router.post(
@@ -1837,11 +1837,11 @@ def _reraise_vanished_evidence(exc: StrategyJobNotFound) -> BacktestIntegrityErr
 
 def _compare_integrity_response(
     request: Request, run_id: str, exc: BacktestIntegrityError
-) -> HTMLResponse:
+) -> Response:
     """Render the Compare picker's explicit integrity-error branch --
     the single call site every corrupt-evidence path in this section
     routes through, so none of them can silently diverge."""
-    return templates.TemplateResponse(
+    return _strategy_fragment(
         request,
         "_compare_picker.html",
         {"run_id": run_id, "integrity_error": str(exc)},
@@ -1921,7 +1921,7 @@ async def compare_picker(
         return _compare_integrity_response(request, run_id, exc)
     if reason:
         context = {**context, "picker_error": reason}
-    return templates.TemplateResponse(request, "_compare_picker.html", context)
+    return _strategy_fragment(request, "_compare_picker.html", context)
 
 
 @router.post(
@@ -1973,11 +1973,11 @@ async def submit_compare(
 
 def _comparison_integrity_response(
     request: Request, run_id_a: str, run_id_b: str, exc: BacktestIntegrityError
-) -> HTMLResponse:
+) -> Response:
     """Render the Comparison page's explicit integrity-error branch --
     the single call site every corrupt-evidence path in this section
     routes through, mirroring ``_compare_integrity_response``'s shape."""
-    return templates.TemplateResponse(
+    return _strategy_fragment(
         request,
         "_comparison.html",
         {
@@ -2068,4 +2068,4 @@ async def comparison_view(
         context = _comparison_context(backtest, run_id_a, run_id_b)
     except BacktestIntegrityError as exc:
         return _comparison_integrity_response(request, run_id_a, run_id_b, exc)
-    return templates.TemplateResponse(request, "_comparison.html", context)
+    return _strategy_fragment(request, "_comparison.html", context)
