@@ -136,10 +136,10 @@
           (874 roster members, 102 excluded as non-runnable)
         </dd>
 
-        <dt>Parameters</dt>A, AAL.L, AAPL, … 772 ticker
+        <dt>Parameters</dt>
         <dd>
           box_lookback_sessions=20, fixed_shares=10, maximum_box_depth_pct=15.0,
-          selected_securities=[772 security IDs —
+          selected_securities=[A, AAL.L, AAPL, … 772 tickers —
           <a href="#universe-ids">view list</a>]
         </dd>
 
@@ -207,28 +207,61 @@
 </div>
 
 <script>
-  // Deterministic pseudo-UUIDs so the mockup shows a realistic full list
-  // without shipping 772 literals. Mockup only — never real data.
+  // Real observed symbols: every 2026-07 snapshot member with
+  // resolution='valid_scan' (profile e0569f59…), sorted by symbol.
+  // Source: data/backtest.db snapshot_members, exported 2026-08-30.
   (function () {
     var list = document.getElementById('id-list');
     if (!list) return;
-    var COUNT = 772, SHOWN = 772;
-    function hex(n, seed) {
-      var out = '';
-      for (var i = 0; i < n; i++) {
-        seed = (seed * 1103515245 + 12345) % 2147483648;
-        out += Math.floor(seed / 2147483648 * 16).toString(16);
-      }
-      return out;
-    }
-    for (var i = 0; i < SHOWN; i++) {
-      var seed = 42 + i * 7919;
-      var id = hex(8, seed) + '-' + hex(4, seed + 1) + '-' + hex(4, seed + 2) +
-               '-' + hex(4, seed + 3) + '-' + hex(12, seed + 4);
+    var tickers = ("A,AAL.L,AAPL,ABBV,ABDN.L,ABNB,ABT,ACGL,ACN,ADBE,ADI,ADM,ADP,ADSK,AEE,AEP,AER,AES," +
+      "AFG,AFL,AFRM,AGNC,AHR,AIG,AIZ,AJG,AKAM,ALB,ALGN,ALL,ALLE,ALSN,AM,AMAT,AMCR,AMD," +
+      "AME,AMGN,AMH,AMP,AMS.L,AMT,AMZN,ANET,AON,AOS,APA,APD,APGE,APH,APN.L,APO,APP,APTV," +
+      "ARCC,ARE,ARES,ARMK,ARW,ARWR,ASC.L,ASND,ATI,ATO,ATYM.L,AV.L,AVGO,AVTR,AVY,AWK,AXON," +
+      "AXP,AXSM,AZO,BA,BAC,BALL,BAM,BAX,BBIO,BBY,BDX,BEN,BEP,BEZ.L,BF-B,BG,BIIB,BIP," +
+      "BKNG,BKR,BLDR,BLK,BLND.L,BMO,BMRN,BMY,BNS,BNY,BPOP,BPT.L,BR,BREE.L,BRK-B,BRO,BSX," +
+      "BTSG,BURL,BWA,BX,BXP,C,CAH,CARR,CART,CASY,CAT,CB,CBOE,CBRE,CCEP,CCEP.L,CCH.L,CCI," +
+      "CCK,CCL,CDNS,CDW,CEG,CF,CFG,CFR,CGNX,CHD,CHG.L,CHRT.L,CHRW,CHTR,CHYM,CI,CIEN," +
+      "CINF,CL,CLH,CLX,CM,CMCSA,CMCX.L,CME,CMG,CMI,CMS,CNA,CNC,CNI,CNP,COF,COHR,COIN," +
+      "COKE,COO,COP,COR,CORT,COST,COST.L,CP,CPAY,CPRT,CPT,CR,CRBG,CRDO,CRE.L,CRH,CRL,CRM," +
+      "CRS,CRWD,CSCO,CSGP,CSL,CSX,CTAS,CTSH,CTVA,CVE,CVNA,CVS,CVX,CYTK,D,DAL,DAR,DASH,DB," +
+      "DCC.L,DCI,DD,DDOG,DE,DECK,DELL,DG,DGE.L,DGX,DHI,DHR,DINO,DIS,DLN.L,DLR,DLTR,DOC," +
+      "DOCU,DOM.L,DOV,DOW,DPLM.L,DPZ,DRI,DT,DTE,DUK,DVA,DVN,DXCM,EAT,EBAY,ECHO,ECL,ED," +
+      "EFX,EG,EGP,EHC,EIX,EL,ELAN,ELS,ELV,EME,EMG.L,EMR,ENTG,EOG,EPD,EQH,EQIX,EQT,ERIE," +
+      "ES,ESS,ET,ETN,ETR,EVRG,EW,EWBC,EXC,EXE,EXEL,EXPD,EXPE,EXR,F,FANG,FAST,FCFS,FCX," +
+      "FDS,FDX,FE,FERG,FFIV,FHN,FICO,FIS,FITB,FIX,FLEX,FOX,FOXA,FRO,FROG,FRT,FSLR,FTI," +
+      "FTNT,FTS,FTV,FWONK,GD,GDDY,GE,GEHC,GEN,GEV,GH,GHH.L,GILD,GIS,GKOS,GL,GLW,GM,GNRC," +
+      "GOOG,GOOGL,GPC,GPN,GRG.L,GRMN,GS,GSAT,GWRE,GWW,H,HAL,HALO,HAS,HBAN,HBM,HCA,HD,HEI," +
+      "HFG.L,HIG,HII,HLT,HMSO.L,HON,HOOD,HPE,HPQ,HRL,HSIC,HSP.L,HST,HSX.L,HSY,HTWS.L," +
+      "HUBB,HUM,HWM,IAG.L,IBKR,IBM,ICE,ICLR,IDXX,IEX,IFF,IHP.L,ILMN,IMI.L,INCY,INF.L," +
+      "INTC,INTU,INVH,INVP.L,IOT,IP,IQV,IR,IRM,ISRG,IT,ITH.L,ITRK.L,ITT,ITW,IVZ,J,JAZZ," +
+      "JBHT,JBL,JCI,JHX,JKHY,JLL,JNJ,JPM,JSG.L,KDP,KEY,KEYS,KHC,KIE.L,KIM,KKR,KLAC,KMB," +
+      "KMI,KNOS.L,KNX,KO,KR,KRYS,KVUE,KYMR,L,LAMR,LAND.L,LDOS,LECO,LEN,LFUS,LGEN.L,LH," +
+      "LHX,LII,LIN,LITE,LLOY.L,LLY,LMT,LNG,LNT,LOW,LPLA,LRCX,LSCC,LSL.L,LTH,LUCE.L,LULU," +
+      "LUV,LVS,LYB,LYV,MA,MAA,MAB.L,MANH,MAR,MAS,MCB.L,MCD,MCHP,MCK,MCO,MDB,MDLZ,MDT," +
+      "MEDP,MET,META,MFC,MGA,MGAM.L,MGM,MKC,MLI,MLM,MMM,MNG.L,MNST,MO,MOH,MONY.L,MOS," +
+      "MPC,MPLX,MPWR,MRK,MRNA,MRSH,MRVL,MS,MSCI,MSFT,MSI,MTB,MTCH,MTD,MTO.L,MU,NBIS,NBIX," +
+      "NCC.L,NCLH,NDAQ,NDSN,NEE,NEM,NET,NFG.L,NFLX,NI,NKE,NLY,NOC,NOW,NRG,NSC,NTAP,NTNX," +
+      "NTRA,NTRS,NUE,NVDA,NVR,NVT,NWG.L,NWS,NWSA,NXPI,O,OC,ODFL,OHI,OKE,OKTA,OMC,ON,ONB," +
+      "ONTO,ORCL,ORI,ORLY,OTIS,OVV,OXY,P,PAA,PAG,PANW,PAYC,PAYX,PBA,PCAR,PCG,PEG,PEP," +
+      "PFD.L,PFE,PFG,PFGC,PG,PGR,PH,PHM,PKG,PLD,PLTR,PM,PNC,PNFP,PNR,PNW,PODD,PPG,PPL," +
+      "PR,PRAX,PRU,PSA,PSKY,PSON.L,PSX,PTC,PTEC.L,PTGX,PWR,PYPL,QCOM,QLT.L,QQ.L,QSR," +
+      "RACE,RBRK,RCL,RDDT,REG,REGN,RF,RGA,RGEN,RIVN,RJF,RL,RMD,RMV.L,RNK.L,RNR,RNWH.L," +
+      "ROIV,ROK,ROKU,ROL,ROP,ROST,RPRX,RS,RSG,RTX,RVMD,RVTY,RWS.L,RY,RYAN,SAIL,SBAC," +
+      "SBRE.L,SBRY.L,SBUX,SCCO,SCHW,SDLF.L,SDR.L,SEIC,SEPL.L,SF,SGRO.L,SHEL.L,SHOP,SHW," +
+      "SIRI,SJM,SLB,SLF,SMCI,SMTC,SN,SNA,SNDK,SNOW,SNPS,SNX,SO,SOLV,SPG,SPGI,SPOT,SRE," +
+      "SSB,SSNC,STAN.L,STE,STLD,STT,STX,STZ,SU,SUN,SW,SWK,SWKS,SYF,SYK,SYY,T,TAP,TATE.L," +
+      "TCAP.L,TD,TDG,TDY,TEAM,TECH,TECK,TEL,TER,TFC,TFII,TGT,THC,TIGO,TJX,TKO,TMO,TMUS," +
+      "TOL,TOST,TPL,TPR,TRGP,TRMB,TROW,TRST.L,TRU,TRV,TSCO,TSEM,TSLA,TSN,TT,TTD,TTWO," +
+      "TWLO,TXN,TXRH,TXT,TYL,U,UAL,UBER,UBS,UDR,UHAL-B,UHS,ULTA,UMBF,UNH,UNM,UNP,UPS," +
+      "URI,USB,USFD,UTG.L,UU.L,V,VEEV,VG,VICI,VIK,VIRT,VLO,VLTO,VLX.L,VMC,VMRK,VRSK," +
+      "VRSN,VRT,VRTX,VSAT,VST,VTR,VTRS,VZ,W,WAB,WAT,WBD,WCC,WCN,WDAY,WDC,WEC,WELL,WES," +
+      "WFC,WM,WMB,WMT,WPC,WRB,WSM,WST,WTFC,WTRG,WTW,WY,WYNN,XEL,XOM,XPO,XPP.L,XYL,XYZ," +
+      "YUM,ZBH,ZBRA,ZIG.L,ZION,ZM,ZTF.L,ZTS").split(",");
+    tickers.forEach(function (ticker) {
       var li = document.createElement('li');
-      li.textContent = id;
+      li.textContent = ticker;
       list.appendChild(li);
-    }
+    });
     var summary = document.querySelector('details.universe summary');
     summary.setAttribute('aria-controls', 'id-list');
   })();
