@@ -6,11 +6,11 @@ GET routes only render repository state.  All lifecycle changes stay behind
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from dataclasses import dataclass, replace
-from decimal import Decimal, InvalidOperation
 import logging
 import re
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from time import perf_counter
 from typing import Annotated, Literal, cast
 from urllib.parse import quote
@@ -28,6 +28,7 @@ from app.api.dependencies import (
     get_readiness_service,
     get_strategy_job_service,
 )
+from app.api.stock_scanner_context import build_freshness_context
 from app.api.templating import templates
 from app.core.security import require_local_or_token
 from app.repositories.backtest_repo import (
@@ -72,6 +73,8 @@ from app.services.backtest.strategy_job import (
     STAGE_SEQUENCES,
     BootstrapSubmissionV1,
     InitializationSubmissionV1,
+    PrerequisiteState,
+    RunUniverseSelectionV1,
     StrategyJobCancellationV1,
     StrategyJobConflict,
     StrategyJobDeletionV1,
@@ -80,13 +83,10 @@ from app.services.backtest.strategy_job import (
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
-    PrerequisiteState,
-    RunUniverseSelectionV1,
     StrategyReadinessV1,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
-from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1
-from app.services.backtest.strategy_protocol import validate_strategy_parameters
+from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1, validate_strategy_parameters
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
@@ -456,6 +456,25 @@ def _form_error_status(request: Request) -> int:
     return 200 if request.headers.get("HX-Request", "").lower() == "true" else 422
 
 
+def _strategy_fragment(
+    request: Request, template: str, context: dict[str, object]
+) -> Response:
+    """Render fragments for partial requests and the shell for browser visits."""
+    accepts_html = "text/html" in request.headers.get("Accept", "").lower()
+    if request.headers.get("HX-Request", "").lower() == "true" or not accepts_html:
+        return templates.TemplateResponse(request, template, context)
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            **build_freshness_context(),
+            **context,
+            "initial_fragment": template,
+            "initial_tab": "strategy-manager",
+        },
+    )
+
+
 @router.get("/partials/strategy-manager", response_class=HTMLResponse)
 @router.get("/strategy-manager", response_class=HTMLResponse)
 async def strategy_manager(
@@ -500,7 +519,7 @@ async def strategy_manager(
         setup_notice=setup_notice,
         activated_at=activated_at,
     )
-    response = templates.TemplateResponse(request, "_strategy_manager.html", context)
+    response = _strategy_fragment(request, "_strategy_manager.html", context)
     logger.info(
         "Strategy Manager tab rendered in %.1fms",
         (perf_counter() - started) * 1_000,
@@ -542,7 +561,7 @@ async def strategy_setup(
             )
     if not bootstrap.is_setup_required():
         return RedirectResponse("/strategy-manager?setup=already", status_code=303)
-    return templates.TemplateResponse(
+    return _strategy_fragment(
         request,
         "_strategy_setup.html",
         {
@@ -629,7 +648,7 @@ async def strategy_readiness(
     ``section=advanced`` (the diagnostics deep link) expands the
     Advanced / troubleshooting disclosure on load."""
     result = readiness.evaluate()
-    return templates.TemplateResponse(
+    return _strategy_fragment(
         request,
         "_strategy_readiness.html",
         {"readiness": result, "open_advanced": section == "advanced"},
@@ -689,7 +708,7 @@ async def universe_selector(
 async def historical_initialization(
     request: Request, backtest: BacktestDep
 ) -> Response:
-    return templates.TemplateResponse(
+    return _strategy_fragment(
         request, "_historical_initialization.html", _initialization_context(backtest)
     )
 
@@ -1461,9 +1480,7 @@ async def strategy_activity(
     try:
         context = _activity_context(backtest, jobs, job_id)
         job = cast(StrategyJobV1, context["job"])
-        return templates.TemplateResponse(
-            request, _activity_template(job.job_type), context
-        )
+        return _strategy_fragment(request, _activity_template(job.job_type), context)
     except StrategyJobNotFound:
         return HTMLResponse("Run no longer available.", status_code=404)
 
