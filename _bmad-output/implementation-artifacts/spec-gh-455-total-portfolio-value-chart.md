@@ -2,8 +2,9 @@
 title: 'Plot total portfolio value from cash and stocks'
 type: 'feature'
 created: '2026-08-31'
-status: 'in-review'
+status: 'done'
 baseline_revision: '9fd10d6d73c59a2be8a51851c2931ef4cc14a2df'
+final_revision: '8ea29de9'
 review_loop_iteration: 0
 followup_review_recommended: true
 context:
