@@ -19,11 +19,15 @@ from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.portfolio_strategies_repo import (
     PortfolioStrategiesRepository,
 )
+from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.strategy_assignment_service import StrategyAssignmentService
+from app.services.portfolio_recommendation_service import (
+    PortfolioRecommendationService,
+)
 from app.services.trader_service import TraderService
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.strategy_bootstrap_service import (
@@ -131,6 +135,18 @@ def get_portfolio_strategies_repository() -> PortfolioStrategiesRepository:
 
 
 @lru_cache
+def get_portfolio_dispatch_repository() -> PortfolioDispatchRepository:
+    """Return the shared recommendation-email dispatch receipt repository (#442).
+
+    The receipt table is the only send-authority for per-portfolio
+    recommendation emails — never a "sent today?" heuristic.
+    """
+    repo = PortfolioDispatchRepository(db.make_connect(lambda: str(TRADES_DB)))
+    repo.ensure_schema()
+    return repo
+
+
+@lru_cache
 def get_strategy_assignment_service() -> StrategyAssignmentService:
     """Return the shared Strategy-assignment service seam (#440).
 
@@ -179,3 +195,17 @@ def get_bootstrap_service() -> StrategyBootstrapService:
 def get_readiness_service() -> StrategyReadinessService:
     """Return the shared readiness/diagnostics service (Story 4.4)."""
     return StrategyReadinessService(get_backtest_repository())
+
+
+@lru_cache
+def get_portfolio_recommendation_service() -> PortfolioRecommendationService:
+    """Return the shared portfolio-recommendation service (#441).
+
+    Composed from the #440 assignment seam and the shared trader service;
+    routes depend on this provider, never on skill discovery or the worker
+    loader directly.
+    """
+    return PortfolioRecommendationService(
+        assignment_service=get_strategy_assignment_service(),
+        trader=get_trader_service(),
+    )
