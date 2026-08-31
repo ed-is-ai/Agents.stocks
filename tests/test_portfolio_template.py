@@ -21,9 +21,12 @@ def _render(cash_balance: float | None, positions: list[Any] | None = None) -> s
         "portfolios": [],
         "active_portfolio": None,
         "chart_labels": "[]",
+        "chart_total_values": "[]",
         "chart_values": "[]",
         "chart_costs": "[]",
         "chart_cash": "[]",
+        "chart_has_unavailable_totals": False,
+        "chart_all_totals_unavailable": False,
         "chart_buys": "[]",
         "chart_sells": "[]",
         "chart_buy_tips": "[]",
@@ -53,9 +56,12 @@ def _render_with_total_pnl(total_pnl_gbp: float) -> str:
         "portfolios": [],
         "active_portfolio": None,
         "chart_labels": "[]",
+        "chart_total_values": "[]",
         "chart_values": "[]",
         "chart_costs": "[]",
         "chart_cash": "[]",
+        "chart_has_unavailable_totals": False,
+        "chart_all_totals_unavailable": False,
         "chart_buys": "[]",
         "chart_sells": "[]",
         "chart_buy_tips": "[]",
@@ -188,6 +194,105 @@ def test_dashboard_template_keeps_context_actions_and_chart_fragment_contracts()
     assert 'hx-target="#portfolio-chart-card" hx-swap="outerHTML"' in chart
 
 
+def test_chart_makes_portfolio_value_dominant_and_supporting_lines_distinct() -> None:
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="12M",
+        chart_points=2,
+        chart_labels='["2026-08-01", "2026-08-02"]',
+        chart_total_values="[110, 125]",
+        chart_values="[100, 120]",
+        chart_costs="[90, 90]",
+        chart_cash="[10, 5]",
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+        chart_buys="[null, 120]",
+        chart_sells="[null, null]",
+        chart_buy_tips='[null, "BUY 1 AAPL"]',
+        chart_sell_tips="[null, null]",
+    )
+
+    labels = ["Portfolio Value", "Market Value", "Cost Basis", "Cash"]
+    assert [html.index(f"label: '{label}'") for label in labels] == sorted(
+        html.index(f"label: '{label}'") for label in labels
+    )
+    portfolio_dataset = html[html.index("label: 'Portfolio Value'") :]
+    market_dataset = html[html.index("label: 'Market Value'") :]
+    cost_dataset = html[html.index("label: 'Cost Basis'") :]
+    cash_dataset = html[html.index("label: 'Cash'") :]
+    assert "borderWidth: 3" in portfolio_dataset[:400]
+    assert "borderDash" not in portfolio_dataset[:400]
+    assert "borderDash: [8, 4]" in market_dataset[:400]
+    assert "borderDash: [2, 3]" in cost_dataset[:400]
+    assert "borderDash: [10, 4, 2, 4]" in cash_dataset[:400]
+    assert 'role="img"' in html
+    assert 'aria-label="Portfolio value history' in html
+    assert "Portfolio value history chart." in html
+
+
+def test_chart_reports_unavailable_totals_without_hiding_supporting_series() -> None:
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="12M",
+        chart_points=2,
+        chart_labels='["2026-08-01", "2026-08-02"]',
+        chart_total_values="[110, null]",
+        chart_values="[100, 120]",
+        chart_costs="[90, 90]",
+        chart_cash="[10, null]",
+        chart_has_unavailable_totals=True,
+        chart_all_totals_unavailable=False,
+        chart_buys="[null, null]",
+        chart_sells="[null, null]",
+        chart_buy_tips="[null, null]",
+        chart_sell_tips="[null, null]",
+    )
+
+    assert "Some Portfolio Value points are unavailable" in html
+    assert "const totals" in html and "[110, null]" in html
+    assert "label: 'Market Value'" in html
+    assert "label: 'Cost Basis'" in html
+    assert "label: 'Cash'" in html
+    assert "window.__portfolioChart?.destroy();" in html
+
+
+def test_chart_distinguishes_all_totals_unavailable_from_partial_history() -> None:
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="12M",
+        chart_points=2,
+        chart_labels='["2026-08-01", "2026-08-02"]',
+        chart_total_values="[null, null]",
+        chart_values="[100, 120]",
+        chart_costs="[90, 90]",
+        chart_cash="[null, null]",
+        chart_has_unavailable_totals=True,
+        chart_all_totals_unavailable=True,
+        chart_buys="[null, null]",
+        chart_sells="[null, null]",
+        chart_buy_tips="[null, null]",
+        chart_sell_tips="[null, null]",
+    )
+
+    assert "Portfolio Value is unavailable because" in html
+    assert "Some Portfolio Value points are unavailable" not in html
+
+
+def test_chart_empty_state_preserves_selector_and_tears_down_instance() -> None:
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="1M",
+        chart_points=1,
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+    )
+
+    assert "No data in this range" in html
+    assert 'aria-label="Chart time range"' in html
+    assert "window.__portfolioChart.destroy()" in html
+    assert "window.__portfolioChart=null" in html
+
+
 def test_dashboard_empty_state_does_not_emit_an_orphan_section_closer() -> None:
     html = templates.get_template("_portfolio.html").render(no_portfolios=True)
 
@@ -270,9 +375,12 @@ def test_partial_refresh_warning_is_visible() -> None:
         "portfolios": [],
         "active_portfolio": None,
         "chart_labels": "[]",
+        "chart_total_values": "[]",
         "chart_values": "[]",
         "chart_costs": "[]",
         "chart_cash": "[]",
+        "chart_has_unavailable_totals": False,
+        "chart_all_totals_unavailable": False,
         "chart_buys": "[]",
         "chart_sells": "[]",
         "chart_buy_tips": "[]",

@@ -397,3 +397,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-454-portfolio-dashboard-layout.md`
   summary: The existing market-value GBP projection uses the default GBP/USD rate whenever a live or cached rate is unavailable, without displaying that fallback provenance on the Portfolio summary card.
   evidence: `portfolio_partial_context()` retains the pre-existing `gbpusd_rate or _DEFAULT_GBPUSD` conversion contract; #454 separates the market-only projection but does not change FX freshness/valuation semantics.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-455-total-portfolio-value-chart.md`
+  summary: The chart teardown contract is asserted from rendered JavaScript source but has no browser-level test that performs consecutive htmx fragment replacements with a live Chart.js instance.
+  evidence: Existing #421 and #455 tests verify the stable card, fragment endpoints, and destroy-before-create source ordering; none executes Chart.js across repeated swaps, and adding that browser harness is independent of the service-owned total-value projection.
