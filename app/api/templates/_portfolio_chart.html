@@ -79,6 +79,7 @@
             pointRadius: 0,
             fill: false,
             tension: 0.3,
+            hidden: true,
             order: 4,
           },
           {
@@ -90,6 +91,7 @@
             pointRadius: 0,
             fill: false,
             tension: 0,
+            hidden: true,
             order: 5,
           },
           {
@@ -101,6 +103,7 @@
             pointRadius: 0,
             fill: false,
             tension: 0,
+            hidden: true,
             order: 6,
           },
           {
@@ -132,9 +135,19 @@
       },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { labels: { font: { size: 11 }, boxWidth: 14, filter: item => item.text !== 'Buy' && item.text !== 'Sell' } },
+          legend: {
+            position: 'bottom',
+            align: 'start',
+            labels: {
+              font: { size: 11 },
+              boxWidth: 14,
+              usePointStyle: true,
+              filter: item => item.text !== 'Buy' && item.text !== 'Sell'
+            }
+          },
           tooltip: {
             callbacks: {
               label: function(ctx) {

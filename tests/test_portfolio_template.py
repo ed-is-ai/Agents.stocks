@@ -172,7 +172,33 @@ def test_summary_cards_have_the_required_market_first_order() -> None:
     indices = [html.index(label) for label in labels]
     assert indices == sorted(indices)
     assert "Positions</div>" not in html[indices[0] : indices[-1]]
-    assert "Excludes cash." in html
+    assert "Includes cash." in html
+
+
+def test_market_value_headline_uses_total_value_including_cash() -> None:
+    html = templates.get_template("_portfolio.html").render(
+        positions=[_fake_position()],
+        cash_balance=50,
+        cash_flows=[],
+        positions_with_value=[_fake_position()],
+        chart_has_history=False,
+        portfolio_id=None,
+        portfolios=[],
+        active_portfolio=None,
+        total_cost_gbp=150,
+        total_value_gbp=150,
+        market_value_gbp=100,
+        total_pnl_gbp=0,
+        total_cost_gbp_valued=100,
+        prices_as_of=None,
+        gbpusd_rate=None,
+        error_message=None,
+        warning_message=None,
+    )
+
+    market_card = html.split("Market Value", 1)[1].split("</div>", 2)[1]
+    assert "£150.00" in market_card
+    assert "£100.00" not in market_card
 
 
 def test_dashboard_template_keeps_context_actions_and_chart_fragment_contracts() -> (
@@ -192,6 +218,9 @@ def test_dashboard_template_keeps_context_actions_and_chart_fragment_contracts()
     assert 'hx-get="/portfolios/{{ active_portfolio.id }}/recommendations"' in template
     assert 'id="portfolio-chart-card"' in chart
     assert 'hx-target="#portfolio-chart-card" hx-swap="outerHTML"' in chart
+    assert template.index('{% include "_portfolio_chart.html" %}') < template.index(
+        'class="portfolio-summary-grid"'
+    )
 
 
 def test_chart_makes_portfolio_value_dominant_and_supporting_lines_distinct() -> None:
@@ -225,6 +254,11 @@ def test_chart_makes_portfolio_value_dominant_and_supporting_lines_distinct() ->
     assert "borderDash: [8, 4]" in market_dataset[:400]
     assert "borderDash: [2, 3]" in cost_dataset[:400]
     assert "borderDash: [10, 4, 2, 4]" in cash_dataset[:400]
+    assert "hidden: true" in market_dataset[:400]
+    assert "hidden: true" in cost_dataset[:400]
+    assert "hidden: true" in cash_dataset[:400]
+    assert "maintainAspectRatio: false" in html
+    assert "position: 'bottom'" in html
     assert 'role="img"' in html
     assert 'aria-label="Portfolio value history' in html
     assert "Portfolio value history chart." in html
@@ -305,6 +339,7 @@ def test_dashboard_responsive_styles_remain_scoped_and_allow_narrow_reflow() -> 
     css = Path("app/api/templates/index.html").read_text(encoding="utf-8")
 
     assert "repeat(auto-fit, minmax(min(100%, 10rem), 1fr))" in css
+    assert "height: clamp(13rem, 20vw, 16rem)" in css
     assert "#tab-content { padding: 1rem; }" not in css
     assert "calc(100vw - 2rem)" in css
 
