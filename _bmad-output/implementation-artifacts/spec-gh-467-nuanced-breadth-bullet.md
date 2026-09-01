@@ -6,7 +6,7 @@ status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 baseline_revision: 'b7fae261ebeadd4cc1a04bf558855272c0155080'
-final_revision: '9d89fabfab7b811151bc8c7dd72e13b5ce20fc8f'
+final_revision: 'd290ce0a'  # HEAD differs by this line only (amend self-reference)
 context: []
 warnings: ['oversized']
 ---
