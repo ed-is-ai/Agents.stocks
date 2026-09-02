@@ -8,10 +8,13 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
-from app.repositories.historical_price_repo import HistoricalPriceRepository
+from app.repositories.historical_price_repo import (
+    HistoricalPriceRepository,
+    StoredHistoricalEvidence,
+)
 from app.services.backtest.detectors import DETECTOR_REGISTRY
 from app.services.backtest.historical_data_qualification import (
     REQUEST_CONTRACT_VERSION,
@@ -311,9 +314,15 @@ class CanonicalSnapshotMonthProcessor:
         if write_set is None:
             return None, None
         previous_members, previous_records = write_set
+        records_by_id = {
+            record.security_id: record for record in previous_records
+        }
+        # Only valid-scan members have records; zip would mispair exclusions.
         carried = {
-            member.security_id: (member, record)
-            for member, record in zip(previous_members, previous_records)
+            member.security_id: (member, records_by_id[member.security_id])
+            for member in previous_members
+            if member.resolution == "valid_scan"
+            and member.security_id in records_by_id
         }
         resolved: list[ResolvedSnapshotMember] = []
         adopted: list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]] = []
@@ -339,7 +348,7 @@ class CanonicalSnapshotMonthProcessor:
             if recomputed.record != item.record:
                 raise InitializationMonthError(
                     JobFailureCode.INTEGRITY_ERROR,
-                    f"Adopted record for {item.record.security_id!r} in "
+                    f"Adopted record for {item.member.security_id!r} in "
                     f"{snapshot_month} diverges from its reconstruction",
                 )
         return predecessor.profile_hash, tuple(resolved)
@@ -399,7 +408,10 @@ class CanonicalSnapshotMonthProcessor:
         new input manifest (gh-468).
         """
         request = self._evidence_request(member, snapshot_month, target_session, now)
-        evidence = self._evidence_for(member, request)
+        evidence = cast(
+            StoredHistoricalEvidence,
+            self._evidence_for(member, request),
+        )
         reconstruction_request = ReconstructionRequestV1(
             security_id=member.security_id,
             observed_symbol=evidence.observed_symbol,

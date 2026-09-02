@@ -81,7 +81,7 @@ def _delta_profile(**overrides):
 
     project_root = Path(__file__).resolve().parents[2]
     manifests = detector_source_manifests(project_root)
-    fields = dict(
+    fields: dict[str, object] = dict(
         schema_version="snapshot_profile.v1",
         display_version="Scanner data v1",
         record_schema_version="historical_scan_record.v1",
@@ -108,8 +108,7 @@ def _delta_profile(**overrides):
         provenance_vocabulary=("best_effort_reconstructed", "observed_bau"),
         cadence="per-exchange month_end",
     )
-    fields.update(overrides)
-    return SnapshotProfileV1(**fields)
+    return SnapshotProfileV1.model_validate({**fields, **overrides})
 
 
 def _empty_repo(path: Path) -> BacktestRepository:

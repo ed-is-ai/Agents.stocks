@@ -3723,7 +3723,7 @@ def _predecessor_profile():
         for detector in DETECTOR_REGISTRY
     )
 
-    return SnapshotProfileV1(
+    fields: dict[str, object] = dict(
         schema_version="snapshot_profile.v1",
         display_version="Scanner data v1",
         record_schema_version="historical_scan_record.v1",
@@ -3743,6 +3743,7 @@ def _predecessor_profile():
         provenance_vocabulary=("best_effort_reconstructed", "observed_bau"),
         cadence="per-exchange month_end",
     )
+    return SnapshotProfileV1.model_validate(fields)
 
 
 def _with_predecessor(repo) -> None:
