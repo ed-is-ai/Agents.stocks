@@ -723,7 +723,15 @@ async def submit_initialization(
     mode: Annotated[str, Form()] = "rebuild",
 ) -> Response:
     if mode not in {"update", "rebuild"}:
-        mode = "rebuild"
+        context = _initialization_context(
+            backtest, values={"start_month": start_month, "end_month": end_month}
+        )
+        return template_response(
+            request,
+            "_historical_initialization.html",
+            {**context, "errors": {"form": "Unknown preparation mode."}},
+            status_code=_form_error_status(request),
+        )
     context = _initialization_context(
         backtest, values={"start_month": start_month, "end_month": end_month}
     )

@@ -19,7 +19,7 @@ from test_historical_scan_reconstruction import (  # noqa: I001
     _request,
     _roster,
 )
-from test_snapshot_coverage_repository import _profile, _snapshot
+from test_snapshot_coverage_repository import NOW, _profile, _snapshot
 
 from app.services.backtest.canonical_manifest import canonical_json
 from app.services.backtest.historical_data_qualification import REQUEST_CONTRACT_VERSION
@@ -218,3 +218,99 @@ def test_predecessor_record_is_rejected_under_new_profile() -> None:
     with pytest.raises(SnapshotContractError):
         _snapshot(new_profile, record=predecessor_record)
     assert date(2026, 7, 31) == date(2026, 7, 31)  # sanity: closed month fixture
+
+
+# ---------------------------------------------------------------------------
+# gh-468: predecessor resolution (activation history + walk-back + fallback)
+# ---------------------------------------------------------------------------
+
+
+def _adoption_repo(tmp_path):
+    import sqlite3
+
+    from test_snapshot_coverage_repository import _repo
+
+    def _seed_profile(profile) -> None:
+        """Insert a profile row without committing any months for it."""
+        with sqlite3.connect(tmp_path / "backtest.db") as conn:
+            conn.execute(
+                """INSERT INTO snapshot_profiles
+                   (profile_hash, canonical_profile_json, display_version,
+                    roster_digest, scanner_schema_version,
+                    calendar_dataset_version, calendar_dataset_digest, cadence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    profile.profile_hash,
+                    profile.canonical_json_bytes().decode(),
+                    profile.display_version,
+                    profile.roster_digest,
+                    profile.record_schema_version,
+                    profile.calendar_dataset_version,
+                    profile.calendar_dataset_digest,
+                    profile.cadence,
+                ),
+            )
+
+    return NOW, _repo(tmp_path / "backtest.db"), _seed_profile
+
+
+def test_previous_profile_uses_activation_history(tmp_path) -> None:
+    from test_snapshot_coverage_repository import _commit, _profile, _snapshot
+
+
+    NOW, repo, seed = _adoption_repo(tmp_path)
+    first = _profile()
+    _commit(repo, _snapshot(first))
+    repo.activate_snapshot_profile(first.profile_hash, NOW)
+    second = _profile(display="Scanner data v2")
+    seed(second)
+    repo.activate_snapshot_profile(second.profile_hash, NOW)
+
+    previous = repo.previous_snapshot_profile(second.profile_hash)
+
+    assert previous is not None
+    assert previous.profile_hash == first.profile_hash
+
+
+def test_previous_profile_walks_back_to_months_owning_predecessor(tmp_path) -> None:
+    """A predecessor that initialized nothing is skipped, not fatal."""
+    from test_snapshot_coverage_repository import _commit, _profile, _snapshot
+
+    NOW, repo, seed = _adoption_repo(tmp_path)
+    first = _profile()
+    _commit(repo, _snapshot(first))
+    repo.activate_snapshot_profile(first.profile_hash, NOW)
+    middle = _profile(display="Scanner data v2")
+    seed(middle)
+    repo.activate_snapshot_profile(middle.profile_hash, NOW)
+    latest = _profile(display="Scanner data v3")
+    seed(latest)
+    repo.activate_snapshot_profile(latest.profile_hash, NOW)
+
+    previous = repo.previous_snapshot_profile(latest.profile_hash)
+
+    assert previous is not None
+    assert previous.profile_hash == first.profile_hash
+
+
+def test_previous_profile_falls_back_without_activation_history(tmp_path) -> None:
+    """Profiles activated before the history table existed resolve via the
+    newest-committed-months heuristic (the live pre-gh-468 databases)."""
+    import sqlite3
+
+    from test_snapshot_coverage_repository import _commit, _profile, _snapshot
+
+    NOW, repo, seed = _adoption_repo(tmp_path)
+    first = _profile()
+    _commit(repo, _snapshot(first))
+    repo.activate_snapshot_profile(first.profile_hash, NOW)
+    latest = _profile(display="Scanner data v9")
+    seed(latest)
+    repo.activate_snapshot_profile(latest.profile_hash, NOW)
+    with sqlite3.connect(tmp_path / "backtest.db") as conn:
+        conn.execute("DELETE FROM snapshot_profile_activation_history")
+
+    previous = repo.previous_snapshot_profile(latest.profile_hash)
+
+    assert previous is not None
+    assert previous.profile_hash == first.profile_hash

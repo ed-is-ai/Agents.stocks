@@ -329,9 +329,24 @@ class CanonicalSnapshotMonthProcessor:
         for member in sorted(self._roster.members, key=lambda item: item.security_id):
             target_session = sessions[member.mic]
             previous = carried.get(member.security_id)
-            if previous is not None and self._carried_identity_matches(
+            adoptable = previous is not None and self._carried_identity_matches(
                 previous[0], previous[1], member, target_session, snapshot_month
-            ):
+            )
+            if adoptable:
+                # The carried payloads are only valid for the evidence they
+                # were computed from: if the price store now resolves a
+                # different revision (re-ingestion/correction), the member
+                # must resolve fresh to stay byte-identical to a Rebuild.
+                request = self._evidence_request(
+                    member, snapshot_month, target_session, now
+                )
+                evidence = cast(
+                    StoredHistoricalEvidence, self._evidence_for(member, request)
+                )
+                adoptable = (
+                    evidence.data_revision == previous[0].provider_data_revision
+                )
+            if adoptable:
                 item, request = self._adopt_valid_member(
                     member, previous[1], snapshot_month, target_session, now
                 )
@@ -351,6 +366,10 @@ class CanonicalSnapshotMonthProcessor:
                     f"Adopted record for {item.member.security_id!r} in "
                     f"{snapshot_month} diverges from its reconstruction",
                 )
+        if not adopted:
+            # Nothing was carried: stamping predecessor provenance on a
+            # 100%-fresh month would mislead adoption audits (gh-468).
+            return None, tuple(resolved)
         return predecessor.profile_hash, tuple(resolved)
 
     @staticmethod

@@ -6578,10 +6578,12 @@ class BacktestRepository:
     def previous_snapshot_profile(self, profile_hash: str) -> SnapshotProfileV1 | None:
         """Return the profile activated immediately before ``profile_hash``.
 
-        Resolution order (gh-468): the activation-history audit table first;
-        for profiles activated before that table existed, the non-active
-        profile with the most recently committed ``snapshot_months``.
-        Returns ``None`` when no predecessor can be resolved.
+        Resolution order (gh-468): activation history walking backwards to
+        the nearest predecessor that owns committed months; for profiles
+        activated before that table existed (or when history yields no
+        candidate with months), the non-active profile with the most
+        recently committed ``snapshot_months``. Returns ``None`` when no
+        predecessor can be resolved.
         """
         with session(self._connect) as conn:
             current_seq = conn.execute(
@@ -6595,21 +6597,22 @@ class BacktestRepository:
                    )""",
                 (profile_hash, profile_hash),
             ).fetchone()
+            candidates: list[object] = []
             if current_seq is not None and current_seq[0] is not None:
-                row = conn.execute(
-                    """SELECT canonical_profile_json
+                candidates = conn.execute(
+                    """SELECT profile.canonical_profile_json
                          FROM snapshot_profile_activation_history history
                          JOIN snapshot_profiles profile
                            ON profile.profile_hash = history.profile_hash
                         WHERE history.activation_seq < ?
                           AND history.profile_hash != ?
-                        ORDER BY history.activation_seq DESC LIMIT 1""",
+                        ORDER BY history.activation_seq DESC""",
                     (int(current_seq[0]), profile_hash),
-                ).fetchone()
-            else:
-                # Pre-history fallback: the non-active profile with the most
-                # recently committed snapshot months is the predecessor.
-                row = conn.execute(
+                ).fetchall()
+            if not candidates:
+                # Pre-history fallback: the non-active profiles with the most
+                # recently committed snapshot months, newest first (gh-468).
+                candidates = conn.execute(
                     """SELECT profile.canonical_profile_json
                          FROM snapshot_months month
                          JOIN snapshot_profiles profile
@@ -6620,17 +6623,21 @@ class BacktestRepository:
                                WHERE singleton_id=1
                           )
                         GROUP BY month.profile_hash
-                        ORDER BY MAX(month.committed_at) DESC LIMIT 1""",
+                        ORDER BY MAX(month.committed_at) DESC""",
                     (profile_hash,),
-                ).fetchone()
-        if row is None:
-            return None
-        try:
-            return SnapshotProfileV1.from_canonical_json(str(row[0]))
-        except Exception as exc:
-            raise BacktestIntegrityError(
-                "stored predecessor snapshot profile is invalid"
-            ) from exc
+                ).fetchall()
+        for row in candidates:
+            try:
+                candidate = SnapshotProfileV1.from_canonical_json(str(row[0]))
+            except Exception as exc:
+                raise BacktestIntegrityError(
+                    "stored predecessor snapshot profile is invalid"
+                ) from exc
+            # Walk back to the nearest predecessor that actually owns
+            # committed months; intermediates initialized nothing (gh-468).
+            if self.profile_has_committed_months(candidate.profile_hash):
+                return candidate
+        return None
 
     def profile_has_committed_months(self, profile_hash: str) -> bool:
         """Return whether one profile owns at least one committed month."""
