@@ -285,6 +285,17 @@ class FakeRepo:
     def snapshot_profile(self, _hash):
         return self.profile
 
+    def previous_snapshot_profile(self, _hash):
+        # gh-468: route tests have no predecessor data version, so the
+        # Update/Rebuild delta stays hidden in these fixtures.
+        return None
+
+    def profile_has_committed_months(self, _hash):
+        return False
+
+    def profile_member_delta(self, _previous, _next):
+        return None
+
     def current_qualification_contract_digest(self):
         return "b" * 64 if self.qualified else None
 
