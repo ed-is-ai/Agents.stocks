@@ -267,9 +267,7 @@ class CanonicalSnapshotMonthProcessor:
                 self._profile.profile_hash
             )
         except BacktestIntegrityError as exc:
-            logger.warning(
-                "Predecessor data version unreadable (%s); rebuilding", exc
-            )
+            logger.warning("Predecessor data version unreadable (%s); rebuilding", exc)
             return None
         if previous is None:
             return None
@@ -319,25 +317,18 @@ class CanonicalSnapshotMonthProcessor:
         }
         resolved: list[ResolvedSnapshotMember] = []
         adopted: list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]] = []
-        for member in sorted(
-            self._roster.members, key=lambda item: item.security_id
-        ):
+        for member in sorted(self._roster.members, key=lambda item: item.security_id):
             target_session = sessions[member.mic]
             previous = carried.get(member.security_id)
-            if (
-                previous is not None
-                and self._carried_identity_matches(
-                    previous[0], previous[1], member, target_session, snapshot_month
-                )
+            if previous is not None and self._carried_identity_matches(
+                previous[0], previous[1], member, target_session, snapshot_month
             ):
                 item, request = self._adopt_valid_member(
                     member, previous[1], snapshot_month, target_session, now
                 )
                 adopted.append((item, request))
             else:
-                item = self._resolve_member(
-                    member, snapshot_month, target_session, now
-                )
+                item = self._resolve_member(member, snapshot_month, target_session, now)
             resolved.append(item)
         # Bounded determinism self-check: recomputing an adopted record from
         # the same pinned evidence through the full reconstruction path must
@@ -487,7 +478,9 @@ class CanonicalSnapshotMonthProcessor:
 
         if (
             target_session < first_observed
-            or tuple(session for session in observed_to_target if session in required_window)
+            or tuple(
+                session for session in observed_to_target if session in required_window
+            )
             != required_window
         ):
             alias_from, alias_to = self._backtest_repository.effective_alias_bounds(

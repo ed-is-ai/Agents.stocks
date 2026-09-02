@@ -6311,8 +6311,7 @@ class BacktestRepository:
             ).fetchall()
         try:
             members = tuple(
-                SnapshotMemberV1.from_canonical_json(str(row[0]))
-                for row in member_rows
+                SnapshotMemberV1.from_canonical_json(str(row[0])) for row in member_rows
             )
             records = tuple(
                 HistoricalScanRecordV1.from_canonical_json(str(row[0]))
@@ -6576,9 +6575,7 @@ class BacktestRepository:
         except Exception as exc:
             raise BacktestIntegrityError("active snapshot profile is invalid") from exc
 
-    def previous_snapshot_profile(
-        self, profile_hash: str
-    ) -> SnapshotProfileV1 | None:
+    def previous_snapshot_profile(self, profile_hash: str) -> SnapshotProfileV1 | None:
         """Return the profile activated immediately before ``profile_hash``.
 
         Resolution order (gh-468): the activation-history audit table first;
@@ -6598,10 +6595,7 @@ class BacktestRepository:
                    )""",
                 (profile_hash, profile_hash),
             ).fetchone()
-            if (
-                current_seq is not None
-                and current_seq[0] is not None
-            ):
+            if current_seq is not None and current_seq[0] is not None:
                 row = conn.execute(
                     """SELECT canonical_profile_json
                          FROM snapshot_profile_activation_history history
@@ -6665,20 +6659,17 @@ class BacktestRepository:
         added = tuple(
             item
             for security_id, item in sorted(next_by_id.items())
-            if security_id not in previous_by_id
-            or previous_by_id[security_id] != item
+            if security_id not in previous_by_id or previous_by_id[security_id] != item
         )
         removed = tuple(
             item
             for security_id, item in sorted(previous_by_id.items())
-            if security_id not in next_by_id
-            or next_by_id[security_id] != item
+            if security_id not in next_by_id or next_by_id[security_id] != item
         )
         unchanged = tuple(
             item
             for security_id, item in sorted(next_by_id.items())
-            if security_id in previous_by_id
-            and previous_by_id[security_id] == item
+            if security_id in previous_by_id and previous_by_id[security_id] == item
         )
         return ProfileMemberDeltaV1(
             previous_profile_hash=previous_profile_hash,

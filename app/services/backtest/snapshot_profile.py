@@ -315,11 +315,14 @@ class SnapshotMemberV1(CanonicalModel):
     provider_evidence_manifest_digest: Digest
     alias_revision: Digest
     record_digest: Digest | None
-    exclusion_reason: Literal[
-        "before_first_provider_observation",
-        "insufficient_detector_history",
-        "incomplete_detector_history",
-    ] | None
+    exclusion_reason: (
+        Literal[
+            "before_first_provider_observation",
+            "insufficient_detector_history",
+            "incomplete_detector_history",
+        ]
+        | None
+    )
     exclusion_evidence: LegitimateExclusionProofV1 | None
     provenance_digest: Digest
 
@@ -1189,7 +1192,9 @@ def build_incomplete_detector_history(
         mic, FULL_HISTORY_START, target_session + timedelta(days=1)
     )[-252:]
     observed_set = set(observed)
-    missing = tuple(session for session in expected_window if session not in observed_set)
+    missing = tuple(
+        session for session in expected_window if session not in observed_set
+    )
     if not missing:
         raise SnapshotContractError("detector window is not incomplete")
     available = len(expected_window) - len(missing)
