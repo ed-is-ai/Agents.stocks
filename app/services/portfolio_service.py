@@ -1200,14 +1200,19 @@ class PortfolioService:
 
         # GH-484: per-position GBP equivalents for the holdings table. Built
         # as a parallel dict keyed by ticker — ``Position`` models are never
-        # mutated here. Only non-GBP rows get entries. Unlike the aggregate
-        # cards above, the row-level secondary figure uses the caller's rate
-        # verbatim (never the legacy default): an explicitly unavailable rate
-        # must yield None so the template omits the figure rather than
-        # fabricating one from a guessed FX number.
+        # mutated here. Only non-GBP rows get entries: ``GBp``/``GBX`` are
+        # already normalised to ``"GBP"`` before a ``Position`` is ever built
+        # (``TraderAgent.get_portfolio``), so they never actually reach this
+        # code as anything but ``"GBP"`` — the membership check is defensive,
+        # not doing real work — and a "≈ £" echo for a pounds position would
+        # be noise either way. USD uses the caller's rate verbatim — never
+        # the legacy default the aggregate cards above fall back to — and
+        # other currencies use the same-day GbpValuationService quote;
+        # either way an unavailable conversion yields None and the template
+        # omits the figure rather than fabricating one.
         position_gbp_values: dict[str, dict[str, float | None]] = {}
         for pos in positions:
-            if pos.price_currency == "GBP":
+            if pos.price_currency in {"GBP", "GBp", "GBX"}:
                 continue
             entry: dict[str, float | None] = {}
             if pos.current_value is not None:

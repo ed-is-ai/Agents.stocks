@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import pandas as pd
+import pytest
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
 from app.schemas.record import StockRecord
@@ -343,6 +344,29 @@ def test_position_gbp_values_none_when_usd_rate_unavailable(monkeypatch) -> None
     entry = ctx["position_gbp_values"]["USDCO"]
     assert entry["market_value_gbp"] is None
     assert entry["unrealised_pnl_gbp"] is None
+
+
+def test_position_gbp_values_preserve_negative_pnl_sign(monkeypatch) -> None:
+    """A USD loss converts through the same never-fabricate rule and keeps
+    its sign (GH-484 regression)."""
+    svc = _make_service(monkeypatch)
+    positions = [
+        Position(
+            ticker="USDCO",
+            shares=1,
+            avg_cost=300,
+            total_cost=300,
+            current_value=200,
+            unrealised_pnl=-100,
+            price_currency="USD",
+        )
+    ]
+
+    ctx = svc.portfolio_partial_context(positions, gbpusd_rate=2.0, cash_balance=0.0)
+
+    entry = ctx["position_gbp_values"]["USDCO"]
+    assert entry["market_value_gbp"] == pytest.approx(100.0)
+    assert entry["unrealised_pnl_gbp"] == pytest.approx(-50.0)
 
 
 def test_gbp_totals_not_double_divided_for_pence_holding_priced_in_pounds(
