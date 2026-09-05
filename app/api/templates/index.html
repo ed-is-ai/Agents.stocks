@@ -400,7 +400,7 @@
       position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
       overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
     }
-    .refresh-data-toggle:hover .refresh-freshness-description,
+    .refresh-data-toggle.hover-armed .refresh-freshness-description,
     .refresh-data-toggle:focus-visible .refresh-freshness-description,
     .refresh-data-toggle.show .refresh-freshness-description {
       width: min(23rem, calc(100vw - 1rem)); height: auto; margin: 0;
@@ -873,6 +873,33 @@
       localStorage.setItem('activePortfolioId', String(id));
     }
   }
+
+  // Refresh Data's freshness tooltip only reveals on hover after a short
+  // delay, and stops reacting to hover entirely once the user has opened
+  // the dropdown by clicking -- the open menu already shows the same
+  // detail, so a lingering hover popup on top of it is just noise.
+  (function () {
+    const toggle = document.getElementById('refresh-data-button');
+    if (!toggle) return;
+    const HOVER_DELAY_MS = 1000;
+    let hoverTimer = null;
+    let hoverDisabled = false;
+
+    toggle.addEventListener('mouseenter', () => {
+      if (hoverDisabled) return;
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => toggle.classList.add('hover-armed'), HOVER_DELAY_MS);
+    });
+    toggle.addEventListener('mouseleave', () => {
+      clearTimeout(hoverTimer);
+      toggle.classList.remove('hover-armed');
+    });
+    toggle.addEventListener('shown.bs.dropdown', () => {
+      hoverDisabled = true;
+      clearTimeout(hoverTimer);
+      toggle.classList.remove('hover-armed');
+    });
+  })();
 
   // Portfolio value-chart range is per-browser too (#421). Absent -> "12M".
   function activeChartRange() {
