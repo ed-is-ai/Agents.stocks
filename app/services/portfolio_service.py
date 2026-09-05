@@ -855,7 +855,7 @@ class PortfolioService:
         if portfolio_id is None:
             return dict.fromkeys(CHART_RANGE_DAYS, True)
         earliest = self._trader.earliest_snapshot_timestamp(portfolio_id)
-        if earliest is None:
+        if not isinstance(earliest, str):
             return dict.fromkeys(CHART_RANGE_DAYS, True)
         availability: dict[str, bool] = {}
         fully_covers = False
