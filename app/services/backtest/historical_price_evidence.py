@@ -34,6 +34,16 @@ from app.services.backtest.historical_data_qualification import (
 FX_PAIR = "GBPUSD=X"
 FX_SERIES_SECURITY_ID = "fx:GBPUSD=X"
 
+
+def fx_pair_for(currency: str) -> str:
+    """Return the ``GBP<CCY>=X`` pair that prices ``currency`` in GBP (#516)."""
+    return f"GBP{currency.strip().upper()}=X"
+
+
+def fx_security_id_for(currency: str) -> str:
+    """Return the pseudo-security id the FX series for ``currency`` commits under."""
+    return f"fx:{fx_pair_for(currency)}"
+
 _REQUIRED_COLUMNS = (
     "Open",
     "High",
@@ -164,10 +174,18 @@ def _number(value: Any, *, nullable: bool = False) -> str | None:
     return number.hex()
 
 
+#: Currencies quoted in whole major units, with no pence-style subunit to
+#: rescale. GBp is the only subunit quoting this pipeline has ever seen, and
+#: it stays special-cased below. Widened beyond GBP/USD for #516: a portfolio
+#: holding a Euronext, Xetra or HKEX line was refused entry to the evidence
+#: store entirely, which blanked every day that holding was held.
+_MAJOR_UNIT_CURRENCIES = frozenset({"GBP", "USD", "EUR", "HKD"})
+
+
 def _quote_contract(provider_unit: str) -> tuple[str, str, str]:
     if provider_unit == "GBp":
         return "GBP", "GBp", "0.01"
-    if provider_unit in {"GBP", "USD"}:
+    if provider_unit in _MAJOR_UNIT_CURRENCIES:
         return provider_unit, provider_unit, "1"
     raise ProviderFailure(
         FailureCode.PROVIDER_CONTRACT_ERROR,
