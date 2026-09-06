@@ -3,6 +3,7 @@ title: 'GH-519: value unpriceable holdings at carrying cost and mark the day est
 type: 'bugfix'
 created: '2026-09-06'
 baseline_revision: 'afa77cda30e83cb238d695d7ff976b6eba4b21d3'
+final_revision: 'd8d3fda4ecb3c8333f496722614ea46f4fcc2800'
 status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: false
